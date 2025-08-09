@@ -1,0 +1,23 @@
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Local env and credentials
+.env
+credentials.json
+
+# WhatsApp session and Google tokens (persist on volume in /app/data)
+session.json
+token.json
+.wwebjs_auth/
+
+# Local data/temp folders
+/data/
+/temp/
+
+# Runtime artifacts
+run.log
+bot.pid
+
+# macOS
+.DS_Store

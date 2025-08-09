@@ -1,0 +1,18 @@
+{
+  "name": "whatsbot",
+  "version": "1.0.0",
+  "description": "WhatsApp bot that uploads forwarded media to Google Drive and returns a shareable link.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "fs-extra": "^11.2.0",
+    "googleapis": "^128.0.0",
+    "mime-types": "^2.1.35",
+    "puppeteer": "^22.10.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.23.0"
+  }
+}
