@@ -8,10 +8,12 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "express": "^4.19.2",
     "fs-extra": "^11.2.0",
     "googleapis": "^128.0.0",
     "mime-types": "^2.1.35",
     "puppeteer": "^22.10.0",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.23.0"
   }

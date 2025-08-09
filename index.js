@@ -24,13 +24,16 @@
 const path = require('path');
 const fs = require('fs');
 const fsExtra = require('fs-extra');
-const qrcode = require('qrcode-terminal');
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
+const express = require('express');
 const mime = require('mime-types');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const { uploadFileToDrive, ensureGoogleAuthReady } = require('./googleDrive');
 
 const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const TEMP_DIR = process.env.TEMP_DIR || '/app/temp';
+const PORT = parseInt(process.env.PORT || '3000', 10);
 fsExtra.ensureDirSync(DATA_DIR);
 fsExtra.ensureDirSync(TEMP_DIR);
 
@@ -54,6 +57,9 @@ if (process.env.PUPPETEER_EXECUTABLE_PATH) {
   puppeteerConfig.executablePath = '/usr/bin/chromium';
 }
 
+let latestQr = null;
+let whatsappReady = false;
+
 const client = new Client({
   puppeteer: puppeteerConfig,
   // Persist WhatsApp session under DATA_DIR using LocalAuth
@@ -61,14 +67,17 @@ const client = new Client({
 });
 
 client.on('qr', (qr) => {
-  // Logs QR in terminal for initial login
-  qrcode.generate(qr, { small: true });
-  console.log('Scan the QR code above to log in.');
+  // Keep the most recent QR in memory for the web viewer
+  latestQr = qr;
+  whatsappReady = false;
+  // Also print an ASCII QR to logs (useful locally)
+  qrcodeTerminal.generate(qr, { small: true });
+  console.log('Scan the QR code above to log in. Or open the QR viewer page.');
 });
 
-// LocalAuth manages session automatically; auth events still logged below if needed
-
 client.on('ready', async () => {
+  whatsappReady = true;
+  latestQr = null;
   console.log('WhatsApp bot is ready.');
   // Check Google Drive auth readiness at startup (non-blocking)
   await ensureGoogleAuthReady();
@@ -141,3 +150,30 @@ client.on('message', async (msg) => {
 });
 
 client.initialize();
+
+// Minimal QR web viewer for Railway
+const app = express();
+app.get('/', async (_req, res) => {
+  try {
+    if (whatsappReady) {
+      res.status(200).send('<html><body><h2>WhatsApp is already authenticated ✅</h2><p>No QR needed.</p></body></html>');
+      return;
+    }
+    if (!latestQr) {
+      res.status(200).send('<html><body><h2>QR not generated yet</h2><p>Wait a few seconds and refresh.</p></body></html>');
+      return;
+    }
+    const dataUrl = await QRCode.toDataURL(latestQr, { margin: 1, width: 320 });
+    res.status(200).send(`<!doctype html><html><body style="font-family: system-ui; text-align:center;">
+      <h3>Scan this QR with WhatsApp</h3>
+      <img src="${dataUrl}" alt="WhatsApp QR" />
+      <p style="opacity:0.7">This page auto-refresh does not occur; refresh manually if it expires.</p>
+    </body></html>`);
+  } catch (err) {
+    res.status(500).send('Failed to render QR.');
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`QR viewer listening on port ${PORT}. Open / to view the QR.`);
+});
