@@ -191,7 +191,10 @@ client.on('message', async (msg) => {
     
     if (text === '.stats') {
       await handleStatsCommand(msg);
-      return;
+    } else if (text === '.duplicate-test') {
+      await handleDuplicateTestCommand(msg);
+    } else if (text.startsWith('.help')) {
+      await msg.reply(getHelpText());
     }
   }
 
@@ -353,6 +356,22 @@ async function handleStatsCommand(msg) {
   await msg.reply(response);
 }
 
+async function handleDuplicateTestCommand(msg) {
+  const userId = msg.from;
+  const messageId = msg.id._serialized;
+  const timestamp = msg.timestamp;
+
+  const messageKey = `${userId}_${messageId}_${timestamp}`;
+  const isDuplicate = processedMessages.has(messageKey);
+
+  let response = `🔄 *Duplicate Test*\n\n`;
+  response += `Message Key: \`${messageKey}\`\n`;
+  response += `Is Duplicate: \`${isDuplicate}\`\n`;
+  response += `Processed Messages Set Size: \`${processedMessages.size}\`\n`;
+
+  await msg.reply(response);
+}
+
 // Helper function to create progress bar
 function createProgressBar(percentage, length = 10) {
   const filled = Math.round((percentage / 100) * length);
@@ -371,6 +390,7 @@ function getHelpText() {
 • \`.queue\` - View upload queue status
 • \`.health\` - Check bot health
 • \`.stats\` - View upload statistics
+• \`.duplicate-test\` - Test duplicate message detection
 
 *Features:*
 • 📤 Upload images, videos, documents, and audio

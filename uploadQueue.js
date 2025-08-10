@@ -42,8 +42,11 @@ class UploadQueue extends EventEmitter {
       const fileHash = await this.generateFileHash(filePath);
       const userKey = `${userId}_${fileHash}`;
       
+      console.log(`🔍 Checking for duplicates: ${path.basename(filePath)} (Hash: ${fileHash.substring(0, 8)}...)`);
+      
       // Check if we've seen this file before in our local cache
       if (this.completedUploads.has(userKey)) {
+        console.log(`✅ Duplicate found in local cache for user ${userId}`);
         return {
           isDuplicate: true,
           existingFile: this.completedUploads.get(userKey),
@@ -53,22 +56,27 @@ class UploadQueue extends EventEmitter {
       
       // Check if file already exists in Google Drive
       const fileStats = await fs.stat(filePath);
+      console.log(`🔍 Checking Google Drive for duplicates: ${path.basename(filePath)} (Size: ${fileStats.size} bytes)`);
+      
       const { checkFileExists } = require('./googleDrive');
       const driveCheck = await checkFileExists(path.basename(filePath), fileStats.size);
       
       if (driveCheck.exists) {
+        console.log(`✅ Duplicate found in Google Drive: ${path.basename(filePath)} (Match type: ${driveCheck.matchType})`);
         return {
           isDuplicate: true,
           existingFile: {
             shareLink: driveCheck.shareLink,
             uploadTime: new Date(driveCheck.createdTime).getTime(),
             filename: path.basename(filePath),
-            source: 'drive'
+            source: 'drive',
+            matchType: driveCheck.matchType
           },
           source: 'drive'
         };
       }
       
+      console.log(`❌ No duplicates found for: ${path.basename(filePath)}`);
       return { isDuplicate: false, fileHash, userKey };
     } catch (error) {
       console.error('Error checking duplicate:', error);
@@ -92,12 +100,15 @@ class UploadQueue extends EventEmitter {
     if (duplicateCheck.isDuplicate) {
       const existingFile = duplicateCheck.existingFile;
       const sourceText = duplicateCheck.source === 'drive' ? 'Google Drive' : 'recent upload';
+      const matchTypeText = existingFile.matchType ? ` (${existingFile.matchType})` : '';
       
       await originalMessage.reply(
-        `⚠️ This file already exists in ${sourceText}!\n\n` +
+        `⚠️ *Duplicate File Detected!*\n\n` +
         `📁 File: ${existingFile.filename}\n` +
         `🔗 Link: ${existingFile.shareLink}\n` +
-        `📅 Uploaded: ${new Date(existingFile.uploadTime).toLocaleString()}`
+        `📅 Uploaded: ${new Date(existingFile.uploadTime).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n` +
+        `📍 Source: ${sourceText}${matchTypeText}\n\n` +
+        `💡 *No need to upload again - use the existing link above!*`
       );
       return { status: 'duplicate', existingFile };
     }
@@ -302,6 +313,21 @@ class UploadQueue extends EventEmitter {
         this.completedUploads.delete(key);
       }
     }
+  }
+
+  // Manually check if a file is duplicate (for external use)
+  async checkDuplicateManually(filePath, userId) {
+    return await this.isDuplicate(filePath, userId);
+  }
+
+  // Get duplicate detection statistics
+  getDuplicateStats() {
+    const localDuplicates = this.completedUploads.size;
+    return {
+      localCacheSize: localDuplicates,
+      totalUploads: this.stats.total,
+      duplicateRate: localDuplicates > 0 ? ((localDuplicates / this.stats.total) * 100).toFixed(2) : '0'
+    };
   }
 }
 

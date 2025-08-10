@@ -184,25 +184,56 @@ async function checkFileExists(fileName, fileSize) {
     const drive = await getDriveClient();
     const folderId = await ensureUploadFolder();
     
-    // Search for files with the same name in our upload folder
+    // Normalize filename for better matching (remove WhatsApp prefixes, extensions)
+    const normalizedFileName = normalizeFileName(fileName);
+    
+    // Search for files with similar names in our upload folder
     const searchResponse = await drive.files.list({
-      q: `name='${fileName}' and '${folderId}' in parents and trashed=false`,
+      q: `'${folderId}' in parents and trashed=false`,
       fields: 'files(id, name, size, webViewLink, webContentLink, createdTime)',
-      spaces: 'drive'
+      spaces: 'drive',
+      orderBy: 'createdTime desc'
     });
     
     if (searchResponse.data.files && searchResponse.data.files.length > 0) {
-      const existingFile = searchResponse.data.files[0];
+      // Check for exact matches first
+      for (const existingFile of searchResponse.data.files) {
+        // Check if names match (exact or normalized)
+        if (existingFile.name === fileName || 
+            normalizeFileName(existingFile.name) === normalizedFileName) {
+          
+          // If file sizes match, it's likely the same file
+          if (existingFile.size && Math.abs(parseInt(existingFile.size) - fileSize) < 100) {
+            const shareLink = existingFile.webViewLink || existingFile.webContentLink;
+            return {
+              exists: true,
+              fileId: existingFile.id,
+              shareLink,
+              createdTime: existingFile.createdTime,
+              matchType: 'name_and_size'
+            };
+          }
+        }
+      }
       
-      // If file sizes match, it's likely the same file
-      if (existingFile.size && parseInt(existingFile.size) === fileSize) {
-        const shareLink = existingFile.webViewLink || existingFile.webContentLink;
-        return {
-          exists: true,
-          fileId: existingFile.id,
-          shareLink,
-          createdTime: existingFile.createdTime
-        };
+      // If no exact name match, check for files with similar sizes (within 1KB tolerance)
+      for (const existingFile of searchResponse.data.files) {
+        if (existingFile.size && Math.abs(parseInt(existingFile.size) - fileSize) < 1024) {
+          // Check if file extensions match
+          const existingExt = existingFile.name.split('.').pop().toLowerCase();
+          const newExt = fileName.split('.').pop().toLowerCase();
+          
+          if (existingExt === newExt) {
+            const shareLink = existingFile.webViewLink || existingFile.webContentLink;
+            return {
+              exists: true,
+              fileId: existingFile.id,
+              shareLink,
+              createdTime: existingFile.createdTime,
+              matchType: 'size_and_extension'
+            };
+          }
+        }
       }
     }
     
@@ -211,6 +242,23 @@ async function checkFileExists(fileName, fileSize) {
     console.error('Error checking if file exists:', error);
     return { exists: false, error: error.message };
   }
+}
+
+// Normalize filename for better duplicate detection
+function normalizeFileName(fileName) {
+  // Remove WhatsApp prefixes like "IMG_", "VID_", "DOC_", etc.
+  let normalized = fileName.replace(/^(IMG_|VID_|DOC_|AUD_|STK_)/, '');
+  
+  // Remove timestamp suffixes like "_1234567890"
+  normalized = normalized.replace(/_\d{10,}$/, '');
+  
+  // Remove WhatsApp media prefixes like "media_1234567890"
+  normalized = normalized.replace(/^media_\d+/, '');
+  
+  // Get the base name without extension
+  const baseName = normalized.split('.')[0];
+  
+  return baseName.toLowerCase().trim();
 }
 
 module.exports = {
