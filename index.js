@@ -259,6 +259,11 @@ async function handleStatusCommand(msg) {
     response += `\n\n👑 *Admin Status:* ${adminUser.role.toUpperCase()}`;
     response += `\n🔑 *Permissions:* ${adminUser.permissions.length}`;
   }
+
+  if (!isAdmin) {
+    response += `\n\n👑 *Admin Status:* Not Admin\n`;
+    response += `🔑 *Permissions:* 0\n`;
+  }
   
   await msg.reply(response);
 }
@@ -403,7 +408,7 @@ async function handleAdminCommand(msg) {
     await handleForceCreateAdminCommand(msg, adminUser);
   } else {
     await msg.reply(
-      `🔧 *Admin Commands*\n\n` +
+      `🔧 *Admin Commands* (Admin Only)\n\n` +
       `*User Management:*\n` +
       `• \`.admin add admin <phone> <role> <name>\`\n` +
       `• \`.admin remove admin <phone>\`\n` +
@@ -415,9 +420,12 @@ async function handleAdminCommand(msg) {
       `• \`.admin list restricted\`\n\n` +
       `*System:*\n` +
       `• \`.admin audit logs [limit]\`\n` +
-      `• \`.admin system status\`\n\n` +
+      `• \`.admin system status\`\n` +
+      `• \`.admin test access\` - Test admin access\n` +
+      `• \`.admin force create admin <phone> <role> <name>\`\n\n` +
       `*Your Role:* ${adminUser.role.toUpperCase()}\n` +
-      `*Permissions:* ${adminUser.permissions.join(', ')}`
+      `*Permissions:* ${adminUser.permissions.join(', ')}\n\n` +
+      `💡 *Note:* These commands are only visible to admin users. Regular users can use \`.check admin\` to see their status.`
     );
   }
 }
@@ -830,17 +838,9 @@ function getHelpText() {
   helpText += `• \`.check admin\` - Check your admin status\n`;
   helpText += `• \`.create default admin\` - Force create the default admin\n\n`;
   
-  helpText += `🔧 *Admin Commands:*\n`;
-  helpText += `• \`.admin\` - Show admin command help\n` +
-      `• \`.admin add admin <phone> <role> <name>\`\n` +
-      `• \`.admin restrict user <phone> <reason> [duration]\`\n` +
-      `• \`.admin warn user <phone> <reason>\`\n` +
-      `• \`.admin system status\`\n` +
-      `• \`.admin test access\` - Test admin access\n` +
-      `• \`.admin force create admin <phone> <role> <name>\`\n\n`;
-  
   helpText += `❓ *Need Help?*\n`;
-  helpText += `Contact an administrator for assistance.`;
+  helpText += `Contact an administrator for assistance.\n\n` +
+  `💡 *Admin Users:* Use \`.admin\` to see available admin commands.`;
   
   return helpText;
 }
