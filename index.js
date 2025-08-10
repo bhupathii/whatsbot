@@ -261,26 +261,18 @@ async function handleStatusCommand(msg) {
   
   let response = `📊 *Your Upload Status*\n\n`;
   
-  if (userStatus.uploads.length === 0) {
+  if (userStatus.total === 0) {
     response += `No uploads found for your account.\n\n`;
   } else {
-    response += `📁 *Recent Uploads:* ${userStatus.uploads.length}\n`;
-    response += `✅ *Successful:* ${userStatus.successful}\n`;
-    response += `❌ *Failed:* ${userStatus.failed}\n`;
-    response += `⏳ *In Queue:* ${userStatus.inQueue}\n\n`;
-    
-    if (userStatus.recentUploads.length > 0) {
-      response += `🕒 *Latest Uploads:*\n`;
-      userStatus.recentUploads.slice(0, 3).forEach(upload => {
-        const status = upload.status === 'completed' ? '✅' : 
-                      upload.status === 'failed' ? '❌' : '⏳';
-        response += `${status} ${upload.filename} (${upload.status})\n`;
-      });
-    }
+    response += `📁 *Your Uploads:*\n`;
+    response += `✅ *Completed:* ${userStatus.completed}\n`;
+    response += `❌ *Failed:* 0\n`;
+    response += `⏳ *In Queue:* ${userStatus.queue}\n`;
+    response += `🔄 *Active:* ${userStatus.active}\n\n`;
   }
   
-  response += `\n🏥 *Bot Health:* ${botHealth.status}\n`;
-  response += `💾 *Memory:* ${botHealth.memoryUsage}\n`;
+  response += `🏥 *Bot Health:* ${botHealth.current.status}\n`;
+  response += `💾 *Memory:* ${botHealth.system.memory.percentage || 'Unknown'}%\n`;
   response += `⏱️ *Uptime:* ${botHealth.uptime}`;
   
   await msg.reply(response);
@@ -290,10 +282,10 @@ async function handleQueueCommand(msg) {
   const queueStatus = uploadQueue.getStatus();
   
   let response = `📋 *Upload Queue Status*\n\n`;
-  response += `⏳ *Total in Queue:* ${queueStatus.total}\n`;
-  response += `🔄 *Currently Processing:* ${queueStatus.processing}\n`;
-  response += `✅ *Completed Today:* ${queueStatus.completedToday}\n`;
-  response += `❌ *Failed Today:* ${queueStatus.failedToday}\n\n`;
+  response += `⏳ *Total in Queue:* ${queueStatus.queueLength}\n`;
+  response += `🔄 *Currently Processing:* ${queueStatus.activeUploads}\n`;
+  response += `✅ *Completed:* ${queueStatus.stats.completed}\n`;
+  response += `❌ *Failed:* ${queueStatus.stats.failed}\n\n`;
   
   if (queueStatus.queue.length > 0) {
     response += `📝 *Current Queue:*\n`;
@@ -326,11 +318,12 @@ async function handleHealthCommand(msg) {
   response += `📦 *Node Version:* ${healthStatus.system.nodeVersion}\n\n`;
   
   response += `📈 *Performance Summary:*\n`;
-  response += `• Upload Success Rate: ${performanceSummary.uploads.successRate}%\n`;
+  response += `• Upload Success Rate: ${performanceSummary.uploads.successRate}\n`;
   response += `• Total Uploads: ${performanceSummary.uploads.total}\n`;
   response += `• Active Uploads: ${performanceSummary.uploads.active}\n`;
   response += `• Queue Length: ${performanceSummary.uploads.queue}\n`;
-  response += `• Last Check: ${performanceSummary.lastCheck}\n\n`;
+  response += `• Last Check: ${performanceSummary.lastCheck}\n`;
+  response += `• Current Time (IST): ${healthMonitor.getCurrentTimeIST()}\n\n`;
   
   await msg.reply(response);
 }
@@ -344,7 +337,7 @@ async function handleStatsCommand(msg) {
   response += `• Total Uploads: ${queueStatus.stats.total}\n`;
   response += `• Completed: ${queueStatus.stats.completed}\n`;
   response += `• Failed: ${queueStatus.stats.failed}\n`;
-  response += `• Success Rate: ${performanceSummary.uploads.successRate}%\n\n`;
+  response += `• Success Rate: ${performanceSummary.uploads.successRate}\n\n`;
   
   response += `⏱️ *Queue Status:*\n`;
   response += `• Queue Length: ${queueStatus.queueLength}\n`;
@@ -353,7 +346,7 @@ async function handleStatsCommand(msg) {
   
   response += `📈 *Performance Metrics:*\n`;
   response += `• Total Uploads: ${performanceSummary.uploads.total}\n`;
-  response += `• Success Rate: ${performanceSummary.uploads.successRate}%\n`;
+  response += `• Success Rate: ${performanceSummary.uploads.successRate}\n`;
   response += `• Active Uploads: ${performanceSummary.uploads.active}\n`;
   response += `• Last Check: ${performanceSummary.lastCheck}\n\n`;
   

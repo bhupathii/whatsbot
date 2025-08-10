@@ -238,6 +238,24 @@ class HealthMonitor {
     return `${seconds}s`;
   }
 
+  // Get current time in India timezone
+  getCurrentTimeIST() {
+    try {
+      return new Date().toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      });
+    } catch (error) {
+      return new Date().toLocaleString();
+    }
+  }
+
   // Clean up old health check data
   cleanupOldData() {
     const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
@@ -259,6 +277,26 @@ class HealthMonitor {
     const healthStatus = this.getHealthStatus();
     const uploadStats = this.metrics.uploadStats;
     
+    // Convert to India time (IST)
+    let lastCheckFormatted = 'Never';
+    if (this.metrics.lastCheck) {
+      try {
+        const date = new Date(this.metrics.lastCheck);
+        lastCheckFormatted = date.toLocaleString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false
+        });
+      } catch (error) {
+        lastCheckFormatted = new Date(this.metrics.lastCheck).toLocaleString();
+      }
+    }
+    
     return {
       status: healthStatus.current.status,
       uptime: healthStatus.uptime,
@@ -271,7 +309,7 @@ class HealthMonitor {
         queue: uploadStats.queueLength || 0,
         active: uploadStats.activeUploads || 0
       },
-      lastCheck: this.metrics.lastCheck ? new Date(this.metrics.lastCheck).toLocaleString() : 'Never'
+      lastCheck: lastCheckFormatted
     };
   }
 }
