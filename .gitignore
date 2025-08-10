@@ -10,6 +10,7 @@ credentials.json
 session.json
 token.json
 .wwebjs_auth/
+.wwebjs_cache/
 
 # Local data/temp folders
 /data/

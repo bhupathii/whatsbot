@@ -286,12 +286,14 @@ class AdminSystem {
       throw new Error(`Invalid role: ${role}`);
     }
 
-    if (this.adminUsers.has(phone)) {
+    const normalizedPhone = this.normalizePhoneNumber(phone);
+    
+    if (this.adminUsers.has(normalizedPhone)) {
       throw new Error('User is already an admin');
     }
 
     const roleData = this.adminRoles.get(role);
-    this.adminUsers.set(phone, {
+    this.adminUsers.set(normalizedPhone, {
       role,
       name,
       addedAt: new Date().toISOString(),
@@ -301,21 +303,23 @@ class AdminSystem {
     });
 
     await this.saveAdminConfig();
-    return this.adminUsers.get(phone);
+    return this.adminUsers.get(normalizedPhone);
   }
 
   // Remove admin user
   async removeAdmin(phone, removedBy) {
-    if (!this.adminUsers.has(phone)) {
+    const normalizedPhone = this.normalizePhoneNumber(phone);
+    
+    if (!this.adminUsers.has(normalizedPhone)) {
       throw new Error('User is not an admin');
     }
 
-    const user = this.adminUsers.get(phone);
+    const user = this.adminUsers.get(normalizedPhone);
     if (user.role === 'super_admin') {
       throw new Error('Cannot remove super admin');
     }
 
-    this.adminUsers.delete(phone);
+    this.adminUsers.delete(normalizedPhone);
     await this.saveAdminConfig();
     
     return {
@@ -327,7 +331,9 @@ class AdminSystem {
 
   // Update admin role
   async updateAdminRole(phone, newRole, updatedBy) {
-    if (!this.adminUsers.has(phone)) {
+    const normalizedPhone = this.normalizePhoneNumber(phone);
+    
+    if (!this.adminUsers.has(normalizedPhone)) {
       throw new Error('User is not an admin');
     }
 
@@ -335,7 +341,7 @@ class AdminSystem {
       throw new Error(`Invalid role: ${newRole}`);
     }
 
-    const user = this.adminUsers.get(phone);
+    const user = this.adminUsers.get(normalizedPhone);
     if (user.role === 'super_admin' && newRole !== 'super_admin') {
       throw new Error('Cannot downgrade super admin');
     }
