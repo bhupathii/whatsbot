@@ -309,17 +309,19 @@ async function handleHealthCommand(msg) {
   const isAdmin = adminSystem.isAdmin(msg.from);
   
   let response = `🏥 *Bot Health Report*\n\n`;
-  response += `📊 *Overall Status:* ${healthStatus.status}\n`;
-  response += `💾 *Memory Usage:* ${healthStatus.memoryUsage}\n`;
-  response += `🖥️ *CPU Usage:* ${healthStatus.cpuUsage}\n`;
-  response += `💿 *Disk Usage:* ${healthStatus.diskUsage}\n`;
-  response += `⏱️ *Uptime:* ${healthStatus.uptime}\n\n`;
+  response += `📊 *Overall Status:* ${healthStatus.current.status}\n`;
+  response += `💾 *Memory Usage:* ${healthStatus.system.memory.percentage || 'Unknown'}%\n`;
+  response += `🖥️ *CPU Usage:* ${healthStatus.system.cpu ? (100 - parseFloat(healthStatus.system.cpu.idlePercentage)).toFixed(2) : 'Unknown'}%\n`;
+  response += `⏱️ *Uptime:* ${healthStatus.uptime}\n`;
+  response += `🖥️ *Platform:* ${healthStatus.system.platform} (${healthStatus.system.arch})\n`;
+  response += `📦 *Node Version:* ${healthStatus.system.nodeVersion}\n\n`;
   
   response += `📈 *Performance Summary:*\n`;
-  response += `• Upload Success Rate: ${performanceSummary.successRate}%\n`;
-  response += `• Average Upload Time: ${performanceSummary.avgUploadTime}\n`;
-  response += `• Total Uploads: ${performanceSummary.totalUploads}\n`;
-  response += `• Active Users: ${performanceSummary.activeUsers}\n\n`;
+  response += `• Upload Success Rate: ${performanceSummary.uploads.successRate}%\n`;
+  response += `• Total Uploads: ${performanceSummary.uploads.total}\n`;
+  response += `• Active Uploads: ${performanceSummary.uploads.active}\n`;
+  response += `• Queue Length: ${performanceSummary.uploads.queue}\n`;
+  response += `• Last Check: ${performanceSummary.lastCheck}\n\n`;
   
   if (isAdmin) {
     const systemStatus = adminSystem.getSystemStatus();
@@ -339,24 +341,26 @@ async function handleStatsCommand(msg) {
   const isAdmin = adminSystem.isAdmin(msg.from);
   
   let response = `📊 *Upload Statistics*\n\n`;
-  response += `📁 *Today's Uploads:*\n`;
-  response += `• Total: ${queueStatus.totalToday}\n`;
-  response += `• Successful: ${queueStatus.completedToday}\n`;
-  response += `• Failed: ${queueStatus.failedToday}\n`;
-  response += `• Success Rate: ${performanceSummary.successRate}%\n\n`;
+  response += `📁 *Current Status:*\n`;
+  response += `• Total Uploads: ${queueStatus.stats.total}\n`;
+  response += `• Completed: ${queueStatus.stats.completed}\n`;
+  response += `• Failed: ${queueStatus.stats.failed}\n`;
+  response += `• Success Rate: ${performanceSummary.uploads.successRate}%\n\n`;
   
-  response += `⏱️ *Performance Metrics:*\n`;
-  response += `• Average Upload Time: ${performanceSummary.avgUploadTime}\n`;
-  response += `• Fastest Upload: ${performanceSummary.fastestUpload}\n`;
-  response += `• Slowest Upload: ${performanceSummary.slowestUpload}\n\n`;
+  response += `⏱️ *Queue Status:*\n`;
+  response += `• Queue Length: ${queueStatus.queueLength}\n`;
+  response += `• Active Uploads: ${queueStatus.activeUploads}\n`;
+  response += `• Max Concurrent: ${queueStatus.maxConcurrent}\n\n`;
   
-  response += `👥 *User Activity:*\n`;
-  response += `• Active Users: ${performanceSummary.activeUsers}\n`;
-  response += `• Top Uploaders: ${performanceSummary.topUploaders?.slice(0, 3).join(', ') || 'None'}\n`;
+  response += `📈 *Performance Metrics:*\n`;
+  response += `• Total Uploads: ${performanceSummary.uploads.total}\n`;
+  response += `• Success Rate: ${performanceSummary.uploads.successRate}%\n`;
+  response += `• Active Uploads: ${performanceSummary.uploads.active}\n`;
+  response += `• Last Check: ${performanceSummary.lastCheck}\n\n`;
   
   if (isAdmin) {
     const adminStats = adminSystem.getAdminStats();
-    response += `\n🔧 *Admin Statistics:*\n`;
+    response += `🔧 *Admin Statistics:*\n`;
     response += `• Total Admins: ${adminStats.totalAdmins}\n`;
     response += `• Active Admins: ${adminStats.activeAdmins}\n`;
     response += `• Role Distribution: ${Object.entries(adminStats.roleCounts).map(([role, count]) => `${role}: ${count}`).join(', ')}`;
