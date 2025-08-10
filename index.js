@@ -835,8 +835,7 @@ function getHelpText() {
   helpText += `• \`.health\` - Detailed bot health report\n`;
   helpText += `• \`.stats\` - Upload statistics and metrics\n`;
   helpText += `• \`.ping\` - Check bot responsiveness\n`;
-  helpText += `• \`.check admin\` - Check your admin status\n`;
-  helpText += `• \`.create default admin\` - Force create the default admin\n\n`;
+  helpText += `• \`.check admin\` - Check your admin status\n\n`;
   
   helpText += `❓ *Need Help?*\n`;
   helpText += `Contact an administrator for assistance.\n\n` +
