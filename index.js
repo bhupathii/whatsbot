@@ -33,6 +33,7 @@ const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const { uploadFileToDrive, ensureGoogleAuthReady } = require('./googleDrive');
 const UploadQueue = require('./uploadQueue');
 const HealthMonitor = require('./healthMonitor');
+const AdminSystem = require('./adminSystem');
 
 const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const TEMP_DIR = process.env.TEMP_DIR || '/app/temp';
@@ -65,9 +66,10 @@ if (process.env.PUPPETEER_EXECUTABLE_PATH) {
 let latestQr = null;
 let whatsappReady = false;
 
-// Initialize upload queue and health monitor
+// Initialize upload queue, health monitor, and admin system
 const uploadQueue = new UploadQueue(MAX_CONCURRENT_UPLOADS);
 const healthMonitor = new HealthMonitor(uploadQueue);
+const adminSystem = new AdminSystem(DATA_DIR);
 
 const client = new Client({
   puppeteer: puppeteerConfig,
@@ -134,10 +136,31 @@ client.on('message', async (msg) => {
       await handleStatsCommand(msg);
       return;
     }
+    
+    if (text.startsWith('.admin')) {
+      await handleAdminCommand(msg);
+      return;
+    }
   }
 
   // Media handling in 1:1 chats
   if (!msg?.hasMedia) return;
+
+  // Check if user is restricted
+  if (adminSystem.isUserRestricted(msg.from)) {
+    const restriction = adminSystem.getUserRestriction(msg.from);
+    const durationText = restriction.duration ? 
+      `for ${restriction.duration} hours` : 'permanently';
+    
+    await msg.reply(
+      `❌ Access Denied\n\n` +
+      `You have been restricted from using this bot ${durationText}.\n\n` +
+      `Reason: ${restriction.reason}\n` +
+      `Restricted by: ${restriction.restrictedBy}\n` +
+      `Contact an administrator for assistance.`
+    );
+    return;
+  }
 
   try {
     // Check if it's a sticker (skip stickers)
@@ -196,113 +219,466 @@ client.on('message', async (msg) => {
 
 // Command handlers
 async function handleStatusCommand(msg) {
-  const userStatus = uploadQueue.getUserStatus(msg.from);
-  const healthStatus = healthMonitor.getPerformanceSummary();
+  const userId = msg.from;
+  const userStatus = uploadQueue.getUserStatus(userId);
+  const botHealth = healthMonitor.getHealthStatus();
+  const isAdmin = adminSystem.isAdmin(userId);
   
-  const statusText = [
-    '📊 **Your Upload Status**',
-    '',
-    `📁 **Queue**: ${userStatus.queue} files waiting`,
-    `🔄 **Active**: ${userStatus.active} files uploading`,
-    `✅ **Completed**: ${userStatus.completed} files`,
-    `📈 **Total**: ${userStatus.total} files`,
-    '',
-    '🏥 **Bot Health**: ' + (healthStatus.status === 'healthy' ? '✅ Good' : 
-                              healthStatus.status === 'warning' ? '⚠️ Warning' : '❌ Critical'),
-    `⏱️ **Uptime**: ${healthStatus.uptime}`,
-    `💾 **Memory**: ${healthStatus.memory}`,
-    `📤 **Success Rate**: ${healthStatus.uploads.successRate}%`
-  ].join('\n');
+  let response = `📊 *Your Upload Status*\n\n`;
   
-  await msg.reply(statusText);
+  if (userStatus.uploads.length === 0) {
+    response += `No uploads found for your account.\n\n`;
+  } else {
+    response += `📁 *Recent Uploads:* ${userStatus.uploads.length}\n`;
+    response += `✅ *Successful:* ${userStatus.successful}\n`;
+    response += `❌ *Failed:* ${userStatus.failed}\n`;
+    response += `⏳ *In Queue:* ${userStatus.inQueue}\n\n`;
+    
+    if (userStatus.recentUploads.length > 0) {
+      response += `🕒 *Latest Uploads:*\n`;
+      userStatus.recentUploads.slice(0, 3).forEach(upload => {
+        const status = upload.status === 'completed' ? '✅' : 
+                      upload.status === 'failed' ? '❌' : '⏳';
+        response += `${status} ${upload.filename} (${upload.status})\n`;
+      });
+    }
+  }
+  
+  response += `\n🏥 *Bot Health:* ${botHealth.status}\n`;
+  response += `💾 *Memory:* ${botHealth.memoryUsage}\n`;
+  response += `⏱️ *Uptime:* ${botHealth.uptime}`;
+  
+  if (isAdmin) {
+    const adminUser = adminSystem.getAdminUser(userId);
+    response += `\n\n👑 *Admin Status:* ${adminUser.role.toUpperCase()}`;
+    response += `\n🔑 *Permissions:* ${adminUser.permissions.length}`;
+  }
+  
+  await msg.reply(response);
 }
 
 async function handleQueueCommand(msg) {
   const queueStatus = uploadQueue.getStatus();
+  const isAdmin = adminSystem.isAdmin(msg.from);
   
-  if (queueStatus.queueLength === 0 && queueStatus.activeUploads === 0) {
-    await msg.reply('📭 Upload queue is empty. All files have been processed!');
-    return;
-  }
+  let response = `📋 *Upload Queue Status*\n\n`;
+  response += `⏳ *Total in Queue:* ${queueStatus.total}\n`;
+  response += `🔄 *Currently Processing:* ${queueStatus.processing}\n`;
+  response += `✅ *Completed Today:* ${queueStatus.completedToday}\n`;
+  response += `❌ *Failed Today:* ${queueStatus.failedToday}\n\n`;
   
-  let queueText = '📋 **Upload Queue Status**\n\n';
-  
-  if (queueStatus.activeUploads > 0) {
-    queueText += `🔄 **Currently Uploading** (${queueStatus.activeUploads}/${queueStatus.maxConcurrent}):\n`;
-    queueStatus.active.forEach(item => {
-      const progressBar = createProgressBar(item.progress);
-      queueText += `• ${item.filename} ${progressBar} ${item.progress}%\n`;
-    });
-    queueText += '\n';
-  }
-  
-  if (queueStatus.queueLength > 0) {
-    queueText += `📁 **Waiting in Queue** (${queueStatus.queueLength}):\n`;
+  if (queueStatus.queue.length > 0) {
+    response += `📝 *Current Queue:*\n`;
     queueStatus.queue.slice(0, 5).forEach((item, index) => {
-      queueText += `• ${index + 1}. ${item.filename}\n`;
+      const progress = item.progress || 0;
+      const progressBar = createProgressBar(progress);
+      response += `${index + 1}. ${item.filename}\n`;
+      response += `   ${progressBar} ${progress}%\n`;
+      response += `   👤 ${item.userId}\n\n`;
     });
-    if (queueStatus.queueLength > 5) {
-      queueText += `• ... and ${queueStatus.queueLength - 5} more files\n`;
+    
+    if (queueStatus.queue.length > 5) {
+      response += `... and ${queueStatus.queue.length - 5} more items\n`;
     }
   }
   
-  await msg.reply(queueText);
+  if (isAdmin) {
+    response += `\n🔧 *Admin Controls:*\n`;
+    response += `• Use \`.queue clear\` to clear completed uploads\n`;
+    response += `• Use \`.queue pause\` to pause processing\n`;
+    response += `• Use \`.queue resume\` to resume processing`;
+  }
+  
+  await msg.reply(response);
 }
 
 async function handleHealthCommand(msg) {
   const healthStatus = healthMonitor.getHealthStatus();
+  const performanceSummary = healthMonitor.getPerformanceSummary();
+  const isAdmin = adminSystem.isAdmin(msg.from);
   
-  let healthText = '🏥 **Bot Health Report**\n\n';
+  let response = `🏥 *Bot Health Report*\n\n`;
+  response += `📊 *Overall Status:* ${healthStatus.status}\n`;
+  response += `💾 *Memory Usage:* ${healthStatus.memoryUsage}\n`;
+  response += `🖥️ *CPU Usage:* ${healthStatus.cpuUsage}\n`;
+  response += `💿 *Disk Usage:* ${healthStatus.diskUsage}\n`;
+  response += `⏱️ *Uptime:* ${healthStatus.uptime}\n\n`;
   
-  // Overall status
-  const statusEmoji = {
-    'healthy': '✅',
-    'warning': '⚠️',
-    'critical': '🚨',
-    'unknown': '❓'
-  };
+  response += `📈 *Performance Summary:*\n`;
+  response += `• Upload Success Rate: ${performanceSummary.successRate}%\n`;
+  response += `• Average Upload Time: ${performanceSummary.avgUploadTime}\n`;
+  response += `• Total Uploads: ${performanceSummary.totalUploads}\n`;
+  response += `• Active Users: ${performanceSummary.activeUsers}\n\n`;
   
-  healthText += `${statusEmoji[healthStatus.current.status] || '❓'} **Status**: ${healthStatus.current.status.toUpperCase()}\n`;
-  
-  if (healthStatus.current.issues.length > 0) {
-    healthText += `⚠️ **Issues**:\n`;
-    healthStatus.current.issues.forEach(issue => {
-      healthText += `• ${issue}\n`;
-    });
-    healthText += '\n';
+  if (isAdmin) {
+    const systemStatus = adminSystem.getSystemStatus();
+    response += `🔧 *System Status:*\n`;
+    response += `• Admin Users: ${systemStatus.adminCount}\n`;
+    response += `• Restricted Users: ${systemStatus.restrictedUserCount}\n`;
+    response += `• Total Warnings: ${systemStatus.totalWarnings}\n`;
+    response += `• Audit Logs: ${systemStatus.auditLogCount}`;
   }
   
-  // System info
-  healthText += `💻 **System**: ${healthStatus.system.platform} ${healthStatus.system.arch}\n`;
-  healthText += `🟢 **Node**: ${healthStatus.system.nodeVersion}\n`;
-  healthText += `⏱️ **Uptime**: ${healthStatus.uptime}\n`;
-  healthText += `💾 **Memory**: ${healthStatus.system.memory.used} / ${healthStatus.system.memory.total} (${healthStatus.system.memory.percentage}%)\n`;
-  healthText += `🔄 **CPU Cores**: ${healthStatus.system.cpu.cores}\n`;
-  healthText += `📊 **Load Average**: ${healthStatus.system.cpu.loadAverage.join(', ')}\n`;
-  
-  await msg.reply(healthText);
+  await msg.reply(response);
 }
 
 async function handleStatsCommand(msg) {
-  const stats = uploadQueue.getStatus();
-  const healthSummary = healthMonitor.getPerformanceSummary();
+  const performanceSummary = healthMonitor.getPerformanceSummary();
+  const queueStatus = uploadQueue.getStatus();
+  const isAdmin = adminSystem.isAdmin(msg.from);
   
-  const statsText = [
-    '📊 **Upload Statistics**',
-    '',
-    `📤 **Total Uploads**: ${stats.stats.total}`,
-    `✅ **Successful**: ${stats.stats.completed}`,
-    `❌ **Failed**: ${stats.stats.failed}`,
-    `📈 **Success Rate**: ${healthSummary.uploads.successRate}%`,
-    '',
-    `📁 **Current Queue**: ${stats.queueLength} files`,
-    `🔄 **Active Uploads**: ${stats.activeUploads}/${stats.maxConcurrent}`,
-    '',
-    `⏱️ **Last Health Check**: ${healthSummary.lastCheck}`,
-    `🏥 **Bot Status**: ${healthSummary.status.toUpperCase()}`
-  ].join('\n');
+  let response = `📊 *Upload Statistics*\n\n`;
+  response += `📁 *Today's Uploads:*\n`;
+  response += `• Total: ${queueStatus.totalToday}\n`;
+  response += `• Successful: ${queueStatus.completedToday}\n`;
+  response += `• Failed: ${queueStatus.failedToday}\n`;
+  response += `• Success Rate: ${performanceSummary.successRate}%\n\n`;
   
-  await msg.reply(statsText);
+  response += `⏱️ *Performance Metrics:*\n`;
+  response += `• Average Upload Time: ${performanceSummary.avgUploadTime}\n`;
+  response += `• Fastest Upload: ${performanceSummary.fastestUpload}\n`;
+  response += `• Slowest Upload: ${performanceSummary.slowestUpload}\n\n`;
+  
+  response += `👥 *User Activity:*\n`;
+  response += `• Active Users: ${performanceSummary.activeUsers}\n`;
+  response += `• Top Uploaders: ${performanceSummary.topUploaders?.slice(0, 3).join(', ') || 'None'}\n`;
+  
+  if (isAdmin) {
+    const adminStats = adminSystem.getAdminStats();
+    response += `\n🔧 *Admin Statistics:*\n`;
+    response += `• Total Admins: ${adminStats.totalAdmins}\n`;
+    response += `• Active Admins: ${adminStats.activeAdmins}\n`;
+    response += `• Role Distribution: ${Object.entries(adminStats.roleCounts).map(([role, count]) => `${role}: ${count}`).join(', ')}`;
+  }
+  
+  await msg.reply(response);
+}
+
+// NEW: Admin command handlers
+async function handleAdminCommand(msg) {
+  const command = msg.body.toLowerCase().trim();
+  const userId = msg.from;
+  
+  // Check if user is admin
+  const adminValidation = adminSystem.validateAdminCommand(userId, 'admin_management');
+  if (!adminValidation.allowed) {
+    await msg.reply(
+      `❌ *Access Denied*\n\n` +
+      `You don't have permission to use admin commands.\n` +
+      `Required: Admin access\n` +
+      `Your role: ${adminValidation.reason}`
+    );
+    return;
+  }
+  
+  const adminUser = adminSystem.getAdminUser(userId);
+  
+  if (command.includes('add admin')) {
+    await handleAddAdminCommand(msg, adminUser);
+  } else if (command.includes('remove admin')) {
+    await handleRemoveAdminCommand(msg, adminUser);
+  } else if (command.includes('list admins')) {
+    await handleListAdminsCommand(msg, adminUser);
+  } else if (command.includes('restrict user')) {
+    await handleRestrictUserCommand(msg, adminUser);
+  } else if (command.includes('unrestrict user')) {
+    await handleUnrestrictUserCommand(msg, adminUser);
+  } else if (command.includes('warn user')) {
+    await handleWarnUserCommand(msg, adminUser);
+  } else if (command.includes('list restricted')) {
+    await handleListRestrictedCommand(msg, adminUser);
+  } else if (command.includes('audit logs')) {
+    await handleAuditLogsCommand(msg, adminUser);
+  } else if (command.includes('system status')) {
+    await handleSystemStatusCommand(msg, adminUser);
+  } else {
+    await msg.reply(
+      `🔧 *Admin Commands*\n\n` +
+      `*User Management:*\n` +
+      `• \`.admin add admin <phone> <role> <name>\`\n` +
+      `• \`.admin remove admin <phone>\`\n` +
+      `• \`.admin list admins\`\n\n` +
+      `*User Control:*\n` +
+      `• \`.admin restrict user <phone> <reason> [duration]\`\n` +
+      `• \`.admin unrestrict user <phone>\`\n` +
+      `• \`.admin warn user <phone> <reason>\`\n` +
+      `• \`.admin list restricted\`\n\n` +
+      `*System:*\n` +
+      `• \`.admin audit logs [limit]\`\n` +
+      `• \`.admin system status\`\n\n` +
+      `*Your Role:* ${adminUser.role.toUpperCase()}\n` +
+      `*Permissions:* ${adminUser.permissions.join(', ')}`
+    );
+  }
+}
+
+async function handleAddAdminCommand(msg, adminUser) {
+  const parts = msg.body.split(' ');
+  if (parts.length < 5) {
+    await msg.reply(
+      `❌ *Invalid Format*\n\n` +
+      `Usage: \`.admin add admin <phone> <role> <name>\`\n\n` +
+      `*Example:*\n` +
+      `\`.admin add admin 919876543210@c.us admin John Doe\`\n\n` +
+      `*Available Roles:*\n` +
+      `• super_admin (Super Admin only)\n` +
+      `• admin\n` +
+      `• moderator\n` +
+      `• viewer`
+    );
+    return;
+  }
+  
+  const phone = parts[3];
+  const role = parts[4];
+  const name = parts.slice(5).join(' ');
+  
+  try {
+    // Check if current user can add this role
+    if (role === 'super_admin' && adminUser.role !== 'super_admin') {
+      await msg.reply('❌ Only super admins can create other super admins.');
+      return;
+    }
+    
+    const newAdmin = await adminSystem.addAdmin(phone, role, name, adminUser.name);
+    
+    await msg.reply(
+      `✅ *Admin Added Successfully*\n\n` +
+      `*Phone:* ${phone}\n` +
+      `*Name:* ${newAdmin.name}\n` +
+      `*Role:* ${newAdmin.role}\n` +
+      `*Added By:* ${newAdmin.addedBy}\n` +
+      `*Permissions:* ${newAdmin.permissions.length}`
+    );
+  } catch (error) {
+    await msg.reply(`❌ *Error:* ${error.message}`);
+  }
+}
+
+async function handleRemoveAdminCommand(msg, adminUser) {
+  const parts = msg.body.split(' ');
+  if (parts.length < 4) {
+    await msg.reply(
+      `❌ *Invalid Format*\n\n` +
+      `Usage: \`.admin remove admin <phone>\`\n\n` +
+      `*Example:*\n` +
+      `\`.admin remove admin 919876543210@c.us\``
+    );
+    return;
+  }
+  
+  const phone = parts[3];
+  
+  try {
+    const result = await adminSystem.removeAdmin(phone, adminUser.name);
+    
+    await msg.reply(
+      `✅ *Admin Removed Successfully*\n\n` +
+      `*Removed User:* ${result.removedUser.name}\n` +
+      `*Previous Role:* ${result.removedUser.role}\n` +
+      `*Removed By:* ${result.removedBy}\n` +
+      `*Timestamp:* ${new Date(result.timestamp).toLocaleString()}`
+    );
+  } catch (error) {
+    await msg.reply(`❌ *Error:* ${error.message}`);
+  }
+}
+
+async function handleListAdminsCommand(msg, adminUser) {
+  const admins = adminSystem.getAllAdmins();
+  
+  let response = `👑 *Admin Users List*\n\n`;
+  
+  admins.forEach(admin => {
+    const status = admin.lastActive ? 
+      `Active: ${new Date(admin.lastActive).toLocaleString()}` : 'Never active';
+    
+    response += `*${admin.name}*\n`;
+    response += `📱 ${admin.phone}\n`;
+    response += `🔑 ${admin.role.toUpperCase()}\n`;
+    response += `⏰ ${status}\n\n`;
+  });
+  
+  response += `*Total Admins:* ${admins.length}`;
+  
+  await msg.reply(response);
+}
+
+async function handleRestrictUserCommand(msg, adminUser) {
+  const parts = msg.body.split(' ');
+  if (parts.length < 5) {
+    await msg.reply(
+      `❌ *Invalid Format*\n\n` +
+      `Usage: \`.admin restrict user <phone> <reason> [duration]\`\n\n` +
+      `*Example:*\n` +
+      `\`.admin restrict user 919876543210@c.us Spam 24\`\n` +
+      `\`.admin restrict user 919876543210@c.us Violation\`\n\n` +
+      `*Duration:* Optional, in hours. Leave empty for permanent restriction.`
+    );
+    return;
+  }
+  
+  const phone = parts[3];
+  const reason = parts[4];
+  const duration = parts[5] ? parseInt(parts[5]) : null;
+  
+  try {
+    const restriction = await adminSystem.restrictUser(phone, reason, adminUser.name, duration);
+    
+    const durationText = duration ? `for ${duration} hours` : 'permanently';
+    
+    await msg.reply(
+      `🚫 *User Restricted Successfully*\n\n` +
+      `*Phone:* ${phone}\n` +
+      `*Reason:* ${reason}\n` +
+      `*Duration:* ${durationText}\n` +
+      `*Restricted By:* ${restriction.restrictedBy}\n` +
+      `*Timestamp:* ${new Date(restriction.restrictedAt).toLocaleString()}`
+    );
+  } catch (error) {
+    await msg.reply(`❌ *Error:* ${error.message}`);
+  }
+}
+
+async function handleUnrestrictUserCommand(msg, adminUser) {
+  const parts = msg.body.split(' ');
+  if (parts.length < 4) {
+    await msg.reply(
+      `❌ *Invalid Format*\n\n` +
+      `Usage: \`.admin unrestrict user <phone>\`\n\n` +
+      `*Example:*\n` +
+      `\`.admin unrestrict user 919876543210@c.us\``
+    );
+    return;
+  }
+  
+  const phone = parts[3];
+  
+  try {
+    const result = await adminSystem.unrestrictUser(phone, adminUser.name);
+    
+    await msg.reply(
+      `✅ *User Unrestricted Successfully*\n\n` +
+      `*Phone:* ${phone}\n` +
+      `*Previous Reason:* ${result.previousReason}\n` +
+      `*Unrestricted By:* ${result.unrestrictedBy}\n` +
+      `*Timestamp:* ${new Date(result.unrestrictedAt).toLocaleString()}`
+    );
+  } catch (error) {
+    await msg.reply(`❌ *Error:* ${error.message}`);
+  }
+}
+
+async function handleWarnUserCommand(msg, adminUser) {
+  const parts = msg.body.split(' ');
+  if (parts.length < 5) {
+    await msg.reply(
+      `❌ *Invalid Format*\n\n` +
+      `Usage: \`.admin warn user <phone> <reason>\`\n\n` +
+      `*Example:*\n` +
+      `\`.admin warn user 919876543210@c.us Inappropriate content\``
+    );
+    return;
+  }
+  
+  const phone = parts[3];
+  const reason = parts.slice(4).join(' ');
+  
+  try {
+    const warning = await adminSystem.warnUser(phone, reason, adminUser.name);
+    
+    await msg.reply(
+      `⚠️ *User Warned Successfully*\n\n` +
+      `*Phone:* ${phone}\n` +
+      `*Reason:* ${reason}\n` +
+      `*Warning Level:* ${warning.warningLevel}\n` +
+      `*Warned By:* ${warning.warnedBy}\n` +
+      `*Timestamp:* ${new Date(warning.warnedAt).toLocaleString()}`
+    );
+  } catch (error) {
+    await msg.reply(`❌ *Error:* ${error.message}`);
+  }
+}
+
+async function handleListRestrictedCommand(msg, adminUser) {
+  const restrictedUsers = adminSystem.getAllRestrictedUsers();
+  
+  if (restrictedUsers.length === 0) {
+    await msg.reply('✅ No users are currently restricted.');
+    return;
+  }
+  
+  let response = `🚫 *Restricted Users List*\n\n`;
+  
+  restrictedUsers.forEach(restriction => {
+    const durationText = restriction.duration ? 
+      `for ${restriction.duration} hours` : 'permanently';
+    
+    response += `*${restriction.phone}*\n`;
+    response += `📝 ${restriction.reason}\n`;
+    response += `⏰ ${durationText}\n`;
+    response += `👮 ${restriction.restrictedBy}\n`;
+    response += `🕒 ${new Date(restriction.restrictedAt).toLocaleString()}\n\n`;
+  });
+  
+  response += `*Total Restricted:* ${restrictedUsers.length}`;
+  
+  await msg.reply(response);
+}
+
+async function handleAuditLogsCommand(msg, adminUser) {
+  const parts = msg.body.split(' ');
+  const limit = parts[4] ? parseInt(parts[4]) : 10;
+  
+  const logs = adminSystem.getAuditLogs(limit);
+  
+  if (logs.length === 0) {
+    await msg.reply('📋 No audit logs found.');
+    return;
+  }
+  
+  let response = `📋 *Recent Audit Logs*\n\n`;
+  
+  logs.slice(0, 5).forEach(log => {
+    response += `*${log.action.replace(/_/g, ' ').toUpperCase()}*\n`;
+    response += `👤 ${log.performedBy}\n`;
+    response += `🕒 ${new Date(log.timestamp).toLocaleString()}\n`;
+    if (log.details.targetUser) {
+      response += `📱 Target: ${log.details.targetUser}\n`;
+    }
+    response += `\n`;
+  });
+  
+  if (logs.length > 5) {
+    response += `... and ${logs.length - 5} more logs\n`;
+  }
+  
+  response += `*Total Logs:* ${adminSystem.getAuditStats().totalActions}`;
+  
+  await msg.reply(response);
+}
+
+async function handleSystemStatusCommand(msg, adminUser) {
+  const systemStatus = adminSystem.getSystemStatus();
+  const auditStats = adminSystem.getAuditStats();
+  
+  let response = `🔧 *System Status Report*\n\n`;
+  
+  response += `👑 *Admin System:*\n`;
+  response += `• Total Admins: ${systemStatus.adminCount}\n`;
+  response += `• Active Admins: ${systemStatus.activeAdmins}\n`;
+  response += `• Roles: ${systemStatus.roles}\n\n`;
+  
+  response += `🚫 *User Control:*\n`;
+  response += `• Restricted Users: ${systemStatus.restrictedUserCount}\n`;
+  response += `• Total Warnings: ${systemStatus.totalWarnings}\n\n`;
+  
+  response += `📋 *Audit System:*\n`;
+  response += `• Total Actions: ${auditStats.totalActions}\n`;
+  response += `• Recent Actions (24h): ${auditStats.recentActions}\n`;
+  response += `• Last Updated: ${new Date(systemStatus.lastUpdated).toLocaleString()}`;
+  
+  await msg.reply(response);
 }
 
 // Helper function to create progress bar
@@ -314,38 +690,31 @@ function createProgressBar(percentage, length = 10) {
 
 // Get help text
 function getHelpText() {
-  return [
-    '🤖 **WhatsApp Drive Bot**',
-    '',
-    'I can upload your media to Google Drive and send you a public link.',
-    '',
-    '📤 **Supported Media**:',
-    '• Images (JPG, PNG, GIF, etc.)',
-    '• Videos (MP4, AVI, MOV, etc.)',
-    '• Documents (PDF, DOC, TXT, etc.)',
-    '• Audio files (MP3, WAV, etc.)',
-    '',
-    '❌ **Not Supported**:',
-    '• Stickers',
-    '• Contact cards',
-    '• Location data',
-    '',
-    '💬 **Commands**:',
-    '• `.ping` – Check if I am online',
-    '• `.help` – Show this help',
-    '• `.status` – Your upload status',
-    '• `.queue` – Current upload queue',
-    '• `.health` – Bot health report',
-    '• `.stats` – Upload statistics',
-    '',
-    '📁 **How it works**:',
-    '1. Send me any supported media file',
-    '2. I\'ll add it to the upload queue',
-    '3. Upload to Google Drive automatically',
-    '4. Get a shareable link when done!',
-    '',
-    '⚠️ **Note**: Duplicate files are automatically detected and won\'t be uploaded again.'
-  ].join('\n');
+  let helpText = `🤖 *WhatsApp Bot Help*\n\n`;
+  
+  helpText += `📁 *Upload Commands:*\n`;
+  helpText += `• Send any media file to upload to Google Drive\n`;
+  helpText += `• Supported: Images, Videos, Documents, Audio\n`;
+  helpText += `• Stickers are not supported\n\n`;
+  
+  helpText += `📊 *Status Commands:*\n`;
+  helpText += `• \`.status\` - Your upload status and bot health\n`;
+  helpText += `• \`.queue\` - Current upload queue status\n`;
+  helpText += `• \`.health\` - Detailed bot health report\n`;
+  helpText += `• \`.stats\` - Upload statistics and metrics\n`;
+  helpText += `• \`.ping\` - Check bot responsiveness\n\n`;
+  
+  helpText += `🔧 *Admin Commands:*\n`;
+  helpText += `• \`.admin\` - Show admin command help\n`;
+  helpText += `• \`.admin add admin <phone> <role> <name>\`\n`;
+  helpText += `• \`.admin restrict user <phone> <reason> [duration]\`\n`;
+  helpText += `• \`.admin warn user <phone> <reason>\`\n`;
+  helpText += `• \`.admin system status\`\n\n`;
+  
+  helpText += `❓ *Need Help?*\n`;
+  helpText += `Contact an administrator for assistance.`;
+  
+  return helpText;
 }
 
 // Listen for upload progress events
@@ -360,106 +729,115 @@ const app = express();
 
 app.get('/', async (_req, res) => {
   try {
-    if (whatsappReady) {
-      const healthStatus = healthMonitor.getPerformanceSummary();
-      const queueStatus = uploadQueue.getStatus();
-      
-      res.status(200).send(`
-        <!doctype html>
-        <html>
-        <head>
-          <title>WhatsApp Drive Bot - Status</title>
-          <style>
-            body { font-family: system-ui, -apple-system, sans-serif; margin: 40px; background: #f5f5f5; }
-            .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            .status { padding: 15px; border-radius: 8px; margin: 20px 0; }
-            .healthy { background: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
-            .warning { background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; }
-            .critical { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
-            .metric { display: inline-block; margin: 10px 20px 10px 0; padding: 10px; background: #f8f9fa; border-radius: 5px; }
-            .metric strong { display: block; font-size: 1.2em; }
-            h1 { color: #333; text-align: center; }
-            h2 { color: #555; border-bottom: 2px solid #eee; padding-bottom: 10px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <h1>🤖 WhatsApp Drive Bot</h1>
-            <p style="text-align: center; color: #28a745; font-size: 1.2em;">✅ WhatsApp is authenticated and ready!</p>
-            
-            <div class="status ${healthStatus.status}">
-              <h2>🏥 Bot Health: ${healthStatus.status.toUpperCase()}</h2>
-              <p><strong>Uptime:</strong> ${healthStatus.uptime}</p>
-              <p><strong>Memory:</strong> ${healthStatus.memory}</p>
-              <p><strong>Last Check:</strong> ${healthStatus.lastCheck}</p>
-            </div>
-            
-            <h2>📊 Upload Statistics</h2>
-            <div class="metric">
-              <strong>Total Uploads</strong>
-              ${healthStatus.uploads.total}
-            </div>
-            <div class="metric">
-              <strong>Success Rate</strong>
-              ${healthStatus.uploads.successRate}
-            </div>
-            <div class="metric">
-              <strong>Queue Length</strong>
-              ${queueStatus.queueLength}
-            </div>
-            <div class="metric">
-              <strong>Active Uploads</strong>
-              ${queueStatus.activeUploads}/${queueStatus.maxConcurrent}
-            </div>
-            
-            <h2>📁 Current Queue</h2>
-            ${queueStatus.queueLength === 0 ? '<p>Queue is empty</p>' : 
-              `<p><strong>Waiting:</strong> ${queueStatus.queueLength} files</p>
-               <p><strong>Processing:</strong> ${queueStatus.activeUploads} files</p>`
-            }
-            
-            <p style="text-align: center; margin-top: 30px; color: #666;">
-              Bot is running and ready to receive media files via WhatsApp
-            </p>
+    const botHealth = healthMonitor.getHealthStatus();
+    const queueStatus = uploadQueue.getStatus();
+    const performanceSummary = healthMonitor.getPerformanceSummary();
+    const systemStatus = adminSystem.getSystemStatus();
+    
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>WhatsApp Bot Dashboard</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+          .container { max-width: 1200px; margin: 0 auto; }
+          .header { background: #25D366; color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
+          .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px; }
+          .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+          .card h3 { margin-top: 0; color: #333; }
+          .status-good { color: #28a745; }
+          .status-warning { color: #ffc107; }
+          .status-error { color: #dc3545; }
+          .progress-bar { background: #e9ecef; height: 20px; border-radius: 10px; overflow: hidden; }
+          .progress-fill { background: #007bff; height: 100%; transition: width 0.3s; }
+          .admin-section { background: #6f42c1; color: white; }
+          .admin-section h3 { color: white; }
+          .refresh-btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; }
+          .refresh-btn:hover { background: #0056b3; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>🤖 WhatsApp Bot Dashboard</h1>
+            <p>Real-time monitoring and control panel</p>
+            <button class="refresh-btn" onclick="location.reload()">🔄 Refresh</button>
           </div>
-        </body>
-        </html>
-      `);
-      return;
-    }
+          
+          <div class="status-grid">
+            <div class="card">
+              <h3>🏥 Bot Health</h3>
+              <p><strong>Status:</strong> <span class="status-${botHealth.status === 'healthy' ? 'good' : botHealth.status === 'warning' ? 'warning' : 'error'}">${botHealth.status.toUpperCase()}</span></p>
+              <p><strong>Memory:</strong> ${botHealth.memoryUsage}</p>
+              <p><strong>CPU:</strong> ${botHealth.cpuUsage}</p>
+              <p><strong>Disk:</strong> ${botHealth.diskUsage}</p>
+              <p><strong>Uptime:</strong> ${botHealth.uptime}</p>
+            </div>
+            
+            <div class="card">
+              <h3>📊 Upload Queue</h3>
+              <p><strong>In Queue:</strong> ${queueStatus.total}</p>
+              <p><strong>Processing:</strong> ${queueStatus.processing}</p>
+              <p><strong>Completed Today:</strong> ${queueStatus.completedToday}</p>
+              <p><strong>Failed Today:</strong> ${queueStatus.failedToday}</p>
+              <p><strong>Success Rate:</strong> ${performanceSummary.successRate}%</p>
+            </div>
+            
+            <div class="card">
+              <h3>📈 Performance</h3>
+              <p><strong>Total Uploads:</strong> ${performanceSummary.totalUploads}</p>
+              <p><strong>Active Users:</strong> ${performanceSummary.activeUsers}</p>
+              <p><strong>Avg Upload Time:</strong> ${performanceSummary.avgUploadTime}</p>
+              <p><strong>Fastest Upload:</strong> ${performanceSummary.fastestUpload}</p>
+            </div>
+            
+            <div class="card admin-section">
+              <h3>👑 Admin System</h3>
+              <p><strong>Total Admins:</strong> ${systemStatus.adminCount}</p>
+              <p><strong>Active Admins:</strong> ${systemStatus.activeAdmins}</p>
+              <p><strong>Restricted Users:</strong> ${systemStatus.restrictedUserCount}</p>
+              <p><strong>Total Warnings:</strong> ${systemStatus.totalWarnings}</p>
+              <p><strong>Audit Logs:</strong> ${systemStatus.auditLogCount}</p>
+            </div>
+          </div>
+          
+          <div class="card">
+            <h3>📋 Recent Activity</h3>
+            <p><em>Last updated: ${new Date().toLocaleString()}</em></p>
+            <p>Use the refresh button to get the latest data.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
     
-    if (!latestQr) {
-      res.status(200).send('<html><body><h2>QR not generated yet</h2><p>Wait a few seconds and refresh.</p></body></html>');
-      return;
-    }
-    
-    const dataUrl = await QRCode.toDataURL(latestQr, { margin: 1, width: 320 });
-    res.status(200).send(`<!doctype html><html><body style="font-family: system-ui; text-align:center;">
-      <h3>Scan this QR with WhatsApp</h3>
-      <img src="${dataUrl}" alt="WhatsApp QR" />
-      <p style="opacity:0.7">This page auto-refresh does not occur; refresh manually if it expires.</p>
-    </body></html>`);
-  } catch (err) {
-    res.status(500).send('Failed to render page.');
+    res.send(html);
+  } catch (error) {
+    res.status(500).send(`Error: ${error.message}`);
   }
 });
 
-// Health check endpoint for monitoring
-app.get('/health', (req, res) => {
+// Add admin API endpoint
+app.get('/admin/status', (req, res) => {
   try {
-    const healthStatus = healthMonitor.getHealthStatus();
+    const systemStatus = adminSystem.getSystemStatus();
+    const auditStats = adminSystem.getAuditStats();
+    
     res.json({
-      status: 'ok',
-      whatsapp: whatsappReady ? 'connected' : 'disconnected',
-      health: healthStatus.current.status,
-      uptime: healthStatus.uptime,
-      timestamp: new Date().toISOString()
+      success: true,
+      data: {
+        system: systemStatus,
+        audit: auditStats,
+        timestamp: new Date().toISOString()
+      }
     });
   } catch (error) {
     res.status(500).json({
-      status: 'error',
-      error: error.message,
-      timestamp: new Date().toISOString()
+      success: false,
+      error: error.message
     });
   }
 });
