@@ -33,7 +33,6 @@ const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const { uploadFileToDrive, ensureGoogleAuthReady } = require('./googleDrive');
 const UploadQueue = require('./uploadQueue');
 const HealthMonitor = require('./healthMonitor');
-const AdminSystem = require('./adminSystem');
 
 const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const TEMP_DIR = process.env.TEMP_DIR || '/app/temp';
@@ -65,11 +64,43 @@ if (process.env.PUPPETEER_EXECUTABLE_PATH) {
 
 let latestQr = null;
 let whatsappReady = false;
+let isInitializing = false;
 
-// Initialize upload queue, health monitor, and admin system
+// Message deduplication to prevent duplicate processing
+const processedMessages = new Set();
+const MESSAGE_DEDUP_TIMEOUT = 30000; // 30 seconds
+
+// Cleanup old processed messages periodically to prevent memory leaks
+setInterval(() => {
+  const now = Date.now();
+  for (const messageKey of processedMessages) {
+    const [timestamp] = messageKey.split('_').slice(-1);
+    if (now - parseInt(timestamp) > MESSAGE_DEDUP_TIMEOUT) {
+      processedMessages.delete(messageKey);
+    }
+  }
+}, 60000); // Clean up every minute
+
+// Graceful shutdown handling
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Received SIGINT, shutting down gracefully...');
+  if (whatsappReady) {
+    await client.destroy();
+  }
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
+  if (whatsappReady) {
+    await client.destroy();
+  }
+  process.exit(0);
+});
+
+// Initialize upload queue and health monitor
 const uploadQueue = new UploadQueue(MAX_CONCURRENT_UPLOADS);
 const healthMonitor = new HealthMonitor(uploadQueue);
-const adminSystem = new AdminSystem(DATA_DIR);
 
 const client = new Client({
   puppeteer: puppeteerConfig,
@@ -81,6 +112,7 @@ client.on('qr', (qr) => {
   // Keep the most recent QR in memory for the web viewer
   latestQr = qr;
   whatsappReady = false;
+  isInitializing = false;
   // Also print an ASCII QR to logs (useful locally)
   qrcodeTerminal.generate(qr, { small: true });
   console.log('Scan the QR code above to log in. Or open the QR viewer page.');
@@ -89,14 +121,42 @@ client.on('qr', (qr) => {
 client.on('ready', async () => {
   whatsappReady = true;
   latestQr = null;
+  isInitializing = false;
   console.log('WhatsApp bot is ready.');
   // Check Google Drive auth readiness at startup (non-blocking)
   await ensureGoogleAuthReady();
 });
 
+client.on('disconnected', (reason) => {
+  whatsappReady = false;
+  isInitializing = false;
+  console.log(`WhatsApp client disconnected: ${reason}`);
+});
+
+client.on('auth_failure', (msg) => {
+  whatsappReady = false;
+  isInitializing = false;
+  console.log('WhatsApp authentication failed:', msg);
+});
+
 client.on('message', async (msg) => {
   const isPrivateChat = typeof msg?.from === 'string' && msg.from.endsWith('@c.us');
   if (!isPrivateChat) return;
+
+  // Message deduplication check
+  const messageKey = `${msg.from}_${msg.id._serialized}_${msg.timestamp}`;
+  if (processedMessages.has(messageKey)) {
+    console.log(`Duplicate message detected, skipping: ${messageKey}`);
+    return;
+  }
+  
+  // Add to processed messages set
+  processedMessages.add(messageKey);
+  
+  // Clean up old processed messages after timeout
+  setTimeout(() => {
+    processedMessages.delete(messageKey);
+  }, MESSAGE_DEDUP_TIMEOUT);
 
   // Text commands in 1:1 chats
   if (typeof msg?.body === 'string') {
@@ -136,37 +196,10 @@ client.on('message', async (msg) => {
       await handleStatsCommand(msg);
       return;
     }
-    
-    if (text.startsWith('.admin')) { // New admin command routing
-      await handleAdminCommand(msg);
-      return;
-    } else if (text.startsWith('.check admin')) { // Simple admin check
-      await handleCheckAdminCommand(msg);
-      return;
-    } else if (text.startsWith('.create default admin')) { // Force create default admin
-      await handleCreateDefaultAdminCommand(msg);
-      return;
-    }
   }
 
   // Media handling in 1:1 chats
   if (!msg?.hasMedia) return;
-
-  // Check if user is restricted
-  if (adminSystem.isUserRestricted(msg.from)) {
-    const restriction = adminSystem.getUserRestriction(msg.from);
-    const durationText = restriction.duration ? 
-      `for ${restriction.duration} hours` : 'permanently';
-    
-    await msg.reply(
-      `❌ Access Denied\n\n` +
-      `You have been restricted from using this bot ${durationText}.\n\n` +
-      `Reason: ${restriction.reason}\n` +
-      `Restricted by: ${restriction.restrictedBy}\n` +
-      `Contact an administrator for assistance.`
-    );
-    return;
-  }
 
   try {
     // Check if it's a sticker (skip stickers)
@@ -228,7 +261,6 @@ async function handleStatusCommand(msg) {
   const userId = msg.from;
   const userStatus = uploadQueue.getUserStatus(userId);
   const botHealth = healthMonitor.getHealthStatus();
-  const isAdmin = adminSystem.isAdmin(userId);
   
   let response = `📊 *Your Upload Status*\n\n`;
   
@@ -254,23 +286,11 @@ async function handleStatusCommand(msg) {
   response += `💾 *Memory:* ${botHealth.memoryUsage}\n`;
   response += `⏱️ *Uptime:* ${botHealth.uptime}`;
   
-  if (isAdmin) {
-    const adminUser = adminSystem.getAdminUser(userId);
-    response += `\n\n👑 *Admin Status:* ${adminUser.role.toUpperCase()}`;
-    response += `\n🔑 *Permissions:* ${adminUser.permissions.length}`;
-  }
-
-  if (!isAdmin) {
-    response += `\n\n👑 *Admin Status:* Not Admin\n`;
-    response += `🔑 *Permissions:* 0\n`;
-  }
-  
   await msg.reply(response);
 }
 
 async function handleQueueCommand(msg) {
   const queueStatus = uploadQueue.getStatus();
-  const isAdmin = adminSystem.isAdmin(msg.from);
   
   let response = `📋 *Upload Queue Status*\n\n`;
   response += `⏳ *Total in Queue:* ${queueStatus.total}\n`;
@@ -293,20 +313,12 @@ async function handleQueueCommand(msg) {
     }
   }
   
-  if (isAdmin) {
-    response += `\n🔧 *Admin Controls:*\n`;
-    response += `• Use \`.queue clear\` to clear completed uploads\n`;
-    response += `• Use \`.queue pause\` to pause processing\n`;
-    response += `• Use \`.queue resume\` to resume processing`;
-  }
-  
   await msg.reply(response);
 }
 
 async function handleHealthCommand(msg) {
   const healthStatus = healthMonitor.getHealthStatus();
   const performanceSummary = healthMonitor.getPerformanceSummary();
-  const isAdmin = adminSystem.isAdmin(msg.from);
   
   let response = `🏥 *Bot Health Report*\n\n`;
   response += `📊 *Overall Status:* ${healthStatus.current.status}\n`;
@@ -323,22 +335,12 @@ async function handleHealthCommand(msg) {
   response += `• Queue Length: ${performanceSummary.uploads.queue}\n`;
   response += `• Last Check: ${performanceSummary.lastCheck}\n\n`;
   
-  if (isAdmin) {
-    const systemStatus = adminSystem.getSystemStatus();
-    response += `🔧 *System Status:*\n`;
-    response += `• Admin Users: ${systemStatus.adminCount}\n`;
-    response += `• Restricted Users: ${systemStatus.restrictedUserCount}\n`;
-    response += `• Total Warnings: ${systemStatus.totalWarnings}\n`;
-    response += `• Audit Logs: ${systemStatus.auditLogCount}`;
-  }
-  
   await msg.reply(response);
 }
 
 async function handleStatsCommand(msg) {
   const performanceSummary = healthMonitor.getPerformanceSummary();
   const queueStatus = uploadQueue.getStatus();
-  const isAdmin = adminSystem.isAdmin(msg.from);
   
   let response = `📊 *Upload Statistics*\n\n`;
   response += `📁 *Current Status:*\n`;
@@ -358,463 +360,7 @@ async function handleStatsCommand(msg) {
   response += `• Active Uploads: ${performanceSummary.uploads.active}\n`;
   response += `• Last Check: ${performanceSummary.lastCheck}\n\n`;
   
-  if (isAdmin) {
-    const adminStats = adminSystem.getAdminStats();
-    response += `🔧 *Admin Statistics:*\n`;
-    response += `• Total Admins: ${adminStats.totalAdmins}\n`;
-    response += `• Active Admins: ${adminStats.activeAdmins}\n`;
-    response += `• Role Distribution: ${Object.entries(adminStats.roleCounts).map(([role, count]) => `${role}: ${count}`).join(', ')}`;
-  }
-  
   await msg.reply(response);
-}
-
-// NEW: Admin command handlers
-async function handleAdminCommand(msg) {
-  const command = msg.body.toLowerCase().trim();
-  const userId = msg.from;
-  
-  // Check if user is admin
-  const adminValidation = adminSystem.validateAdminCommand(userId, 'admin_management');
-  if (!adminValidation.allowed) {
-    await msg.reply(
-      `❌ *Access Denied*\n\n` +
-      `You don't have permission to use admin commands.\n` +
-      `Required: Admin access\n` +
-      `Your role: ${adminValidation.reason}`
-    );
-    return;
-  }
-  
-  const adminUser = adminSystem.getAdminUser(userId);
-  
-  if (command.includes('add admin')) {
-    await handleAddAdminCommand(msg, adminUser);
-  } else if (command.includes('remove admin')) {
-    await handleRemoveAdminCommand(msg, adminUser);
-  } else if (command.includes('list admins')) {
-    await handleListAdminsCommand(msg, adminUser);
-  } else if (command.includes('restrict user')) {
-    await handleRestrictUserCommand(msg, adminUser);
-  } else if (command.includes('unrestrict user')) {
-    await handleUnrestrictUserCommand(msg, adminUser);
-  } else if (command.includes('warn user')) {
-    await handleWarnUserCommand(msg, adminUser);
-  } else if (command.includes('list restricted')) {
-    await handleListRestrictedCommand(msg, adminUser);
-  } else if (command.includes('audit logs')) {
-    await handleAuditLogsCommand(msg, adminUser);
-  } else if (command.includes('system status')) {
-    await handleSystemStatusCommand(msg, adminUser);
-  } else if (command.includes('test access')) {
-    await handleTestAdminAccessCommand(msg, adminUser);
-  } else if (command.includes('force create admin')) {
-    await handleForceCreateAdminCommand(msg, adminUser);
-  } else {
-    await msg.reply(
-      `🔧 *Admin Commands* (Admin Only)\n\n` +
-      `*User Management:*\n` +
-      `• \`.admin add admin <phone> <role> <name>\`\n` +
-      `• \`.admin remove admin <phone>\`\n` +
-      `• \`.admin list admins\`\n\n` +
-      `*User Control:*\n` +
-      `• \`.admin restrict user <phone> <reason> [duration]\`\n` +
-      `• \`.admin unrestrict user <phone>\`\n` +
-      `• \`.admin warn user <phone> <reason>\`\n` +
-      `• \`.admin list restricted\`\n\n` +
-      `*System:*\n` +
-      `• \`.admin audit logs [limit]\`\n` +
-      `• \`.admin system status\`\n` +
-      `• \`.admin test access\` - Test admin access\n` +
-      `• \`.admin force create admin <phone> <role> <name>\`\n\n` +
-      `*Your Role:* ${adminUser.role.toUpperCase()}\n` +
-      `*Permissions:* ${adminUser.permissions.join(', ')}\n\n` +
-      `💡 *Note:* These commands are only visible to admin users. Regular users can use \`.check admin\` to see their status.`
-    );
-  }
-}
-
-async function handleAddAdminCommand(msg, adminUser) {
-  const parts = msg.body.split(' ');
-  if (parts.length < 5) {
-    await msg.reply(
-      `❌ *Invalid Format*\n\n` +
-      `Usage: \`.admin add admin <phone> <role> <name>\`\n\n` +
-      `*Example:*\n` +
-      `\`.admin add admin 919876543210@c.us admin John Doe\`\n\n` +
-      `*Available Roles:*\n` +
-      `• super_admin (Super Admin only)\n` +
-      `• admin\n` +
-      `• moderator\n` +
-      `• viewer`
-    );
-    return;
-  }
-  
-  const phone = parts[3];
-  const role = parts[4];
-  const name = parts.slice(5).join(' ');
-  
-  try {
-    // Check if current user can add this role
-    if (role === 'super_admin' && adminUser.role !== 'super_admin') {
-      await msg.reply('❌ Only super admins can create other super admins.');
-      return;
-    }
-    
-    const newAdmin = await adminSystem.addAdmin(phone, role, name, adminUser.name);
-    
-    await msg.reply(
-      `✅ *Admin Added Successfully*\n\n` +
-      `*Phone:* ${phone}\n` +
-      `*Name:* ${newAdmin.name}\n` +
-      `*Role:* ${newAdmin.role}\n` +
-      `*Added By:* ${newAdmin.addedBy}\n` +
-      `*Permissions:* ${newAdmin.permissions.length}`
-    );
-  } catch (error) {
-    await msg.reply(`❌ *Error:* ${error.message}`);
-  }
-}
-
-async function handleRemoveAdminCommand(msg, adminUser) {
-  const parts = msg.body.split(' ');
-  if (parts.length < 4) {
-    await msg.reply(
-      `❌ *Invalid Format*\n\n` +
-      `Usage: \`.admin remove admin <phone>\`\n\n` +
-      `*Example:*\n` +
-      `\`.admin remove admin 919876543210@c.us\``
-    );
-    return;
-  }
-  
-  const phone = parts[3];
-  
-  try {
-    const result = await adminSystem.removeAdmin(phone, adminUser.name);
-    
-    await msg.reply(
-      `✅ *Admin Removed Successfully*\n\n` +
-      `*Removed User:* ${result.removedUser.name}\n` +
-      `*Previous Role:* ${result.removedUser.role}\n` +
-      `*Removed By:* ${result.removedBy}\n` +
-      `*Timestamp:* ${new Date(result.timestamp).toLocaleString()}`
-    );
-  } catch (error) {
-    await msg.reply(`❌ *Error:* ${error.message}`);
-  }
-}
-
-async function handleListAdminsCommand(msg, adminUser) {
-  const admins = adminSystem.getAllAdmins();
-  
-  let response = `👑 *Admin Users List*\n\n`;
-  
-  admins.forEach(admin => {
-    const status = admin.lastActive ? 
-      `Active: ${new Date(admin.lastActive).toLocaleString()}` : 'Never active';
-    
-    response += `*${admin.name}*\n`;
-    response += `📱 ${admin.phone}\n`;
-    response += `🔑 ${admin.role.toUpperCase()}\n`;
-    response += `⏰ ${status}\n\n`;
-  });
-  
-  response += `*Total Admins:* ${admins.length}`;
-  
-  await msg.reply(response);
-}
-
-async function handleRestrictUserCommand(msg, adminUser) {
-  const parts = msg.body.split(' ');
-  if (parts.length < 5) {
-    await msg.reply(
-      `❌ *Invalid Format*\n\n` +
-      `Usage: \`.admin restrict user <phone> <reason> [duration]\`\n\n` +
-      `*Example:*\n` +
-      `\`.admin restrict user 919876543210@c.us Spam 24\`\n` +
-      `\`.admin restrict user 919876543210@c.us Violation\`\n\n` +
-      `*Duration:* Optional, in hours. Leave empty for permanent restriction.`
-    );
-    return;
-  }
-  
-  const phone = parts[3];
-  const reason = parts[4];
-  const duration = parts[5] ? parseInt(parts[5]) : null;
-  
-  try {
-    const restriction = await adminSystem.restrictUser(phone, reason, adminUser.name, duration);
-    
-    const durationText = duration ? `for ${duration} hours` : 'permanently';
-    
-    await msg.reply(
-      `🚫 *User Restricted Successfully*\n\n` +
-      `*Phone:* ${phone}\n` +
-      `*Reason:* ${reason}\n` +
-      `*Duration:* ${durationText}\n` +
-      `*Restricted By:* ${restriction.restrictedBy}\n` +
-      `*Timestamp:* ${new Date(restriction.restrictedAt).toLocaleString()}`
-    );
-  } catch (error) {
-    await msg.reply(`❌ *Error:* ${error.message}`);
-  }
-}
-
-async function handleUnrestrictUserCommand(msg, adminUser) {
-  const parts = msg.body.split(' ');
-  if (parts.length < 4) {
-    await msg.reply(
-      `❌ *Invalid Format*\n\n` +
-      `Usage: \`.admin unrestrict user <phone>\`\n\n` +
-      `*Example:*\n` +
-      `\`.admin unrestrict user 919876543210@c.us\``
-    );
-    return;
-  }
-  
-  const phone = parts[3];
-  
-  try {
-    const result = await adminSystem.unrestrictUser(phone, adminUser.name);
-    
-    await msg.reply(
-      `✅ *User Unrestricted Successfully*\n\n` +
-      `*Phone:* ${phone}\n` +
-      `*Previous Reason:* ${result.previousReason}\n` +
-      `*Unrestricted By:* ${result.unrestrictedBy}\n` +
-      `*Timestamp:* ${new Date(result.unrestrictedAt).toLocaleString()}`
-    );
-  } catch (error) {
-    await msg.reply(`❌ *Error:* ${error.message}`);
-  }
-}
-
-async function handleWarnUserCommand(msg, adminUser) {
-  const parts = msg.body.split(' ');
-  if (parts.length < 5) {
-    await msg.reply(
-      `❌ *Invalid Format*\n\n` +
-      `Usage: \`.admin warn user <phone> <reason>\`\n\n` +
-      `*Example:*\n` +
-      `\`.admin warn user 919876543210@c.us Inappropriate content\``
-    );
-    return;
-  }
-  
-  const phone = parts[3];
-  const reason = parts.slice(4).join(' ');
-  
-  try {
-    const warning = await adminSystem.warnUser(phone, reason, adminUser.name);
-    
-    await msg.reply(
-      `⚠️ *User Warned Successfully*\n\n` +
-      `*Phone:* ${phone}\n` +
-      `*Reason:* ${reason}\n` +
-      `*Warning Level:* ${warning.warningLevel}\n` +
-      `*Warned By:* ${warning.warnedBy}\n` +
-      `*Timestamp:* ${new Date(warning.warnedAt).toLocaleString()}`
-    );
-  } catch (error) {
-    await msg.reply(`❌ *Error:* ${error.message}`);
-  }
-}
-
-async function handleListRestrictedCommand(msg, adminUser) {
-  const restrictedUsers = adminSystem.getAllRestrictedUsers();
-  
-  if (restrictedUsers.length === 0) {
-    await msg.reply('✅ No users are currently restricted.');
-    return;
-  }
-  
-  let response = `🚫 *Restricted Users List*\n\n`;
-  
-  restrictedUsers.forEach(restriction => {
-    const durationText = restriction.duration ? 
-      `for ${restriction.duration} hours` : 'permanently';
-    
-    response += `*${restriction.phone}*\n`;
-    response += `📝 ${restriction.reason}\n`;
-    response += `⏰ ${durationText}\n`;
-    response += `👮 ${restriction.restrictedBy}\n`;
-    response += `🕒 ${new Date(restriction.restrictedAt).toLocaleString()}\n\n`;
-  });
-  
-  response += `*Total Restricted:* ${restrictedUsers.length}`;
-  
-  await msg.reply(response);
-}
-
-async function handleAuditLogsCommand(msg, adminUser) {
-  const parts = msg.body.split(' ');
-  const limit = parts[4] ? parseInt(parts[4]) : 10;
-  
-  const logs = adminSystem.getAuditLogs(limit);
-  
-  if (logs.length === 0) {
-    await msg.reply('📋 No audit logs found.');
-    return;
-  }
-  
-  let response = `📋 *Recent Audit Logs*\n\n`;
-  
-  logs.slice(0, 5).forEach(log => {
-    response += `*${log.action.replace(/_/g, ' ').toUpperCase()}*\n`;
-    response += `👤 ${log.performedBy}\n`;
-    response += `🕒 ${new Date(log.timestamp).toLocaleString()}\n`;
-    if (log.details.targetUser) {
-      response += `📱 Target: ${log.details.targetUser}\n`;
-    }
-    response += `\n`;
-  });
-  
-  if (logs.length > 5) {
-    response += `... and ${logs.length - 5} more logs\n`;
-  }
-  
-  response += `*Total Logs:* ${adminSystem.getAuditStats().totalActions}`;
-  
-  await msg.reply(response);
-}
-
-async function handleSystemStatusCommand(msg, adminUser) {
-  const systemStatus = adminSystem.getSystemStatus();
-  const auditStats = adminSystem.getAuditStats();
-  
-  let response = `🔧 *System Status Report*\n\n`;
-  
-  response += `👑 *Admin System:*\n`;
-  response += `• Total Admins: ${systemStatus.adminCount}\n`;
-  response += `• Active Admins: ${systemStatus.activeAdmins}\n`;
-  response += `• Roles: ${systemStatus.roles}\n\n`;
-  
-  response += `🚫 *User Control:*\n`;
-  response += `• Restricted Users: ${systemStatus.restrictedUserCount}\n`;
-  response += `• Total Warnings: ${systemStatus.totalWarnings}\n\n`;
-  
-  response += `📋 *Audit System:*\n`;
-  response += `• Total Actions: ${auditStats.totalActions}\n`;
-  response += `• Recent Actions (24h): ${auditStats.recentActions}\n`;
-  response += `• Last Updated: ${new Date(systemStatus.lastUpdated).toLocaleString()}`;
-  
-  await msg.reply(response);
-}
-
-async function handleTestAdminAccessCommand(msg, adminUser) {
-  try {
-    const userId = msg.from;
-    const testPhone = '6309513603';
-    
-    // Test different phone number formats
-    const testResults = adminSystem.testAdminAccess(testPhone);
-    
-    let response = `🔍 *Admin Access Test Results*\n\n`;
-    response += `*Your Phone:* ${userId}\n`;
-    response += `*Your Role:* ${adminUser.role.toUpperCase()}\n`;
-    response += `*Your Permissions:* ${adminUser.permissions.join(', ')}\n\n`;
-    
-    response += `*Testing Phone:* ${testPhone}\n`;
-    response += `*Normalized:* ${testResults.normalizedPhone}\n`;
-    response += `*Is Admin:* ${testResults.isAdmin ? '✅ Yes' : '❌ No'}\n`;
-    
-    if (testResults.userData) {
-      response += `*Admin Data:* ${testResults.userData.role} - ${testResults.userData.name}\n`;
-    }
-    
-    response += `\n*All Admin Phones:*\n`;
-    testResults.allAdminPhones.forEach(phone => {
-      response += `• ${phone}\n`;
-    });
-    
-    await msg.reply(response);
-  } catch (error) {
-    await msg.reply(`❌ *Test Failed*\n\n` +
-      `*Error:* ${error.message}`
-    );
-  }
-}
-
-async function handleForceCreateAdminCommand(msg, adminUser) {
-  const parts = msg.body.split(' ');
-  if (parts.length < 5) {
-    await msg.reply(
-      `❌ *Invalid Format*\n\n` +
-      `Usage: \`.admin force create admin <phone> <role> <name>\`\n\n` +
-      `*Example:*\n` +
-      `\`.admin force create admin 919876543210@c.us super_admin John Doe\`\n\n` +
-      `*Available Roles:*\n` +
-      `• super_admin (Super Admin only)\n` +
-      `• admin\n` +
-      `• moderator\n` +
-      `• viewer`
-    );
-    return;
-  }
-  
-  const phone = parts[3];
-  const role = parts[4];
-  const name = parts.slice(5).join(' ');
-  
-  try {
-    // Force create admin, bypassing role restrictions
-    const newAdmin = await adminSystem.forceCreateAdmin(phone, role, name, adminUser.name);
-    
-    await msg.reply(
-      `✅ *Admin Force Created Successfully*\n\n` +
-      `*Phone:* ${phone}\n` +
-      `*Name:* ${newAdmin.name}\n` +
-      `*Role:* ${newAdmin.role}\n` +
-      `*Added By:* ${newAdmin.addedBy}\n` +
-      `*Permissions:* ${newAdmin.permissions.length}`
-    );
-  } catch (error) {
-    await msg.reply(`❌ *Error:* ${error.message}`);
-  }
-}
-
-async function handleCheckAdminCommand(msg) {
-  const userId = msg.from;
-  const isAdmin = adminSystem.isAdmin(userId);
-  const adminUser = adminSystem.getAdminUser(userId);
-
-  let response = `🔍 *Admin Check*\n\n`;
-  response += `*Your Phone:* ${userId}\n`;
-  response += `*Your Role:* ${isAdmin ? adminUser.role.toUpperCase() : 'Not Admin'}\n`;
-  response += `*Your Permissions:* ${isAdmin ? adminUser.permissions.join(', ') : 'None'}\n`;
-
-  if (isAdmin) {
-    response += `\n*Your Admin Status:* ${adminUser.role.toUpperCase()}\n`;
-    response += `*Permissions:* ${adminUser.permissions.length}\n`;
-    response += `*Last Active:* ${adminUser.lastActive ? new Date(adminUser.lastActive).toLocaleString() : 'Never'}\n`;
-  }
-
-  await msg.reply(response);
-}
-
-async function handleCreateDefaultAdminCommand(msg) {
-  const userId = msg.from;
-  const isAdmin = adminSystem.isAdmin(userId);
-
-  if (!isAdmin) {
-    await msg.reply('❌ You must be an admin to force create the default admin.');
-    return;
-  }
-
-  try {
-    const result = await adminSystem.forceCreateDefaultAdmin();
-    await msg.reply(
-      `✅ *Default Admin Force Created Successfully*\n\n` +
-      `*Phone:* ${result.normalizedPhone}\n` +
-      `*Name:* ${result.userData.name}\n` +
-      `*Role:* ${result.userData.role}\n` +
-      `*Permissions:* ${result.userData.permissions.length}`
-    );
-  } catch (error) {
-    await msg.reply(`❌ *Error:* ${error.message}`);
-  }
 }
 
 // Helper function to create progress bar
@@ -826,26 +372,28 @@ function createProgressBar(percentage, length = 10) {
 
 // Get help text
 function getHelpText() {
-  let helpText = `🤖 *WhatsApp Bot Help*\n\n`;
-  
-  helpText += `📁 *Upload Commands:*\n`;
-  helpText += `• Send any media file to upload to Google Drive\n`;
-  helpText += `• Supported: Images, Videos, Documents, Audio\n`;
-  helpText += `• Stickers are not supported\n\n`;
-  
-  helpText += `📊 *Status Commands:*\n`;
-  helpText += `• \`.status\` - Your upload status and bot health\n`;
-  helpText += `• \`.queue\` - Current upload queue status\n`;
-  helpText += `• \`.health\` - Detailed bot health report\n`;
-  helpText += `• \`.stats\` - Upload statistics and metrics\n`;
-  helpText += `• \`.ping\` - Check bot responsiveness\n`;
-  helpText += `• \`.check admin\` - Check your admin status\n\n`;
-  
-  helpText += `❓ *Need Help?*\n`;
-  helpText += `Contact an administrator for assistance.\n\n` +
-  `💡 *Admin Users:* Use \`.admin\` to see available admin commands.`;
-  
-  return helpText;
+  return `🤖 *WhatsApp → Google Drive Bot*
+
+*Commands:*
+• \`.help\` - Show this help message
+• \`.ping\` - Test bot response
+• \`.status\` - Check your upload status
+• \`.queue\` - View upload queue status
+• \`.health\` - Check bot health
+• \`.stats\` - View upload statistics
+
+*Features:*
+• 📤 Upload images, videos, documents, and audio
+• 🚫 Stickers are not supported
+• 🔄 Queue system for multiple uploads
+• 📊 Progress tracking and duplicate detection
+• 🏥 Health monitoring
+• 🌐 Web dashboard at http://localhost:3000
+
+*Usage:*
+Simply forward any media file to this bot and it will upload it to Google Drive and share the link with you.
+
+*Note:* This bot only works in private chats (1:1 conversations).`;
 }
 
 // Listen for upload progress events
@@ -853,7 +401,17 @@ uploadQueue.on('progress', (progressData) => {
   console.log(`Upload progress for ${progressData.filename}: ${progressData.progress}%`);
 });
 
-client.initialize();
+// Initialize WhatsApp client only if not already initializing
+if (!isInitializing && !whatsappReady) {
+  isInitializing = true;
+  console.log('Initializing WhatsApp client...');
+  client.initialize().catch(error => {
+    console.error('Failed to initialize WhatsApp client:', error);
+    isInitializing = false;
+  });
+} else {
+  console.log('WhatsApp client already initialized or initializing, skipping...');
+}
 
 // Enhanced web interface
 const app = express();
@@ -863,7 +421,6 @@ app.get('/', async (_req, res) => {
     const botHealth = healthMonitor.getHealthStatus();
     const queueStatus = uploadQueue.getStatus();
     const performanceSummary = healthMonitor.getPerformanceSummary();
-    const systemStatus = adminSystem.getSystemStatus();
     
     const html = `
       <!DOCTYPE html>
@@ -884,8 +441,6 @@ app.get('/', async (_req, res) => {
           .status-error { color: #dc3545; }
           .progress-bar { background: #e9ecef; height: 20px; border-radius: 10px; overflow: hidden; }
           .progress-fill { background: #007bff; height: 100%; transition: width 0.3s; }
-          .admin-section { background: #6f42c1; color: white; }
-          .admin-section h3 { color: white; }
           .refresh-btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; }
           .refresh-btn:hover { background: #0056b3; }
         </style>
@@ -924,15 +479,6 @@ app.get('/', async (_req, res) => {
               <p><strong>Avg Upload Time:</strong> ${performanceSummary.avgUploadTime}</p>
               <p><strong>Fastest Upload:</strong> ${performanceSummary.fastestUpload}</p>
             </div>
-            
-            <div class="card admin-section">
-              <h3>👑 Admin System</h3>
-              <p><strong>Total Admins:</strong> ${systemStatus.adminCount}</p>
-              <p><strong>Active Admins:</strong> ${systemStatus.activeAdmins}</p>
-              <p><strong>Restricted Users:</strong> ${systemStatus.restrictedUserCount}</p>
-              <p><strong>Total Warnings:</strong> ${systemStatus.totalWarnings}</p>
-              <p><strong>Audit Logs:</strong> ${systemStatus.auditLogCount}</p>
-            </div>
           </div>
           
           <div class="card">
@@ -948,28 +494,6 @@ app.get('/', async (_req, res) => {
     res.send(html);
   } catch (error) {
     res.status(500).send(`Error: ${error.message}`);
-  }
-});
-
-// Add admin API endpoint
-app.get('/admin/status', (req, res) => {
-  try {
-    const systemStatus = adminSystem.getSystemStatus();
-    const auditStats = adminSystem.getAuditStats();
-    
-    res.json({
-      success: true,
-      data: {
-        system: systemStatus,
-        audit: auditStats,
-        timestamp: new Date().toISOString()
-      }
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
   }
 });
 
