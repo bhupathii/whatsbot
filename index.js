@@ -26,8 +26,6 @@ const path = require('path');
 const fs = require('fs');
 const fsExtra = require('fs-extra');
 const qrcodeTerminal = require('qrcode-terminal');
-const QRCode = require('qrcode');
-const express = require('express');
 const mime = require('mime-types');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const { uploadFileToDrive, ensureGoogleAuthReady } = require('./googleDrive');
@@ -36,7 +34,6 @@ const HealthMonitor = require('./healthMonitor');
 
 const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const TEMP_DIR = process.env.TEMP_DIR || '/app/temp';
-const PORT = parseInt(process.env.PORT || '3000', 10);
 const MAX_CONCURRENT_UPLOADS = parseInt(process.env.MAX_CONCURRENT_UPLOADS || '3', 10);
 
 fsExtra.ensureDirSync(DATA_DIR);
@@ -387,8 +384,7 @@ function getHelpText() {
 • 🚫 Stickers are not supported
 • 🔄 Queue system for multiple uploads
 • 📊 Progress tracking and duplicate detection
-• 🏥 Health monitoring
-• 🌐 Web dashboard at http://localhost:3000
+• 🔄 Health monitoring
 
 *Usage:*
 Simply forward any media file to this bot and it will upload it to Google Drive and share the link with you.
@@ -412,91 +408,3 @@ if (!isInitializing && !whatsappReady) {
 } else {
   console.log('WhatsApp client already initialized or initializing, skipping...');
 }
-
-// Enhanced web interface
-const app = express();
-
-app.get('/', async (_req, res) => {
-  try {
-    const botHealth = healthMonitor.getHealthStatus();
-    const queueStatus = uploadQueue.getStatus();
-    const performanceSummary = healthMonitor.getPerformanceSummary();
-    
-    const html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>WhatsApp Bot Dashboard</title>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-          body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-          .container { max-width: 1200px; margin: 0 auto; }
-          .header { background: #25D366; color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
-          .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px; }
-          .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-          .card h3 { margin-top: 0; color: #333; }
-          .status-good { color: #28a745; }
-          .status-warning { color: #ffc107; }
-          .status-error { color: #dc3545; }
-          .progress-bar { background: #e9ecef; height: 20px; border-radius: 10px; overflow: hidden; }
-          .progress-fill { background: #007bff; height: 100%; transition: width 0.3s; }
-          .refresh-btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; }
-          .refresh-btn:hover { background: #0056b3; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>🤖 WhatsApp Bot Dashboard</h1>
-            <p>Real-time monitoring and control panel</p>
-            <button class="refresh-btn" onclick="location.reload()">🔄 Refresh</button>
-          </div>
-          
-          <div class="status-grid">
-            <div class="card">
-              <h3>🏥 Bot Health</h3>
-              <p><strong>Status:</strong> <span class="status-${botHealth.status === 'healthy' ? 'good' : botHealth.status === 'warning' ? 'warning' : 'error'}">${botHealth.status.toUpperCase()}</span></p>
-              <p><strong>Memory:</strong> ${botHealth.memoryUsage}</p>
-              <p><strong>CPU:</strong> ${botHealth.cpuUsage}</p>
-              <p><strong>Disk:</strong> ${botHealth.diskUsage}</p>
-              <p><strong>Uptime:</strong> ${botHealth.uptime}</p>
-            </div>
-            
-            <div class="card">
-              <h3>📊 Upload Queue</h3>
-              <p><strong>In Queue:</strong> ${queueStatus.total}</p>
-              <p><strong>Processing:</strong> ${queueStatus.processing}</p>
-              <p><strong>Completed Today:</strong> ${queueStatus.completedToday}</p>
-              <p><strong>Failed Today:</strong> ${queueStatus.failedToday}</p>
-              <p><strong>Success Rate:</strong> ${performanceSummary.successRate}%</p>
-            </div>
-            
-            <div class="card">
-              <h3>📈 Performance</h3>
-              <p><strong>Total Uploads:</strong> ${performanceSummary.totalUploads}</p>
-              <p><strong>Active Users:</strong> ${performanceSummary.activeUsers}</p>
-              <p><strong>Avg Upload Time:</strong> ${performanceSummary.avgUploadTime}</p>
-              <p><strong>Fastest Upload:</strong> ${performanceSummary.fastestUpload}</p>
-            </div>
-          </div>
-          
-          <div class="card">
-            <h3>📋 Recent Activity</h3>
-            <p><em>Last updated: ${new Date().toLocaleString()}</em></p>
-            <p>Use the refresh button to get the latest data.</p>
-          </div>
-        </div>
-      </body>
-      </html>
-    `;
-    
-    res.send(html);
-  } catch (error) {
-    res.status(500).send(`Error: ${error.message}`);
-  }
-});
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Web interface listening on port ${PORT}. Open / to view status or /health for health check.`);
-});
