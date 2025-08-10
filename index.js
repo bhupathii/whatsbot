@@ -137,8 +137,14 @@ client.on('message', async (msg) => {
       return;
     }
     
-    if (text.startsWith('.admin')) {
+    if (text.startsWith('.admin')) { // New admin command routing
       await handleAdminCommand(msg);
+      return;
+    } else if (text.startsWith('.check admin')) { // Simple admin check
+      await handleCheckAdminCommand(msg);
+      return;
+    } else if (text.startsWith('.create default admin')) { // Force create default admin
+      await handleCreateDefaultAdminCommand(msg);
       return;
     }
   }
@@ -391,6 +397,10 @@ async function handleAdminCommand(msg) {
     await handleAuditLogsCommand(msg, adminUser);
   } else if (command.includes('system status')) {
     await handleSystemStatusCommand(msg, adminUser);
+  } else if (command.includes('test access')) {
+    await handleTestAdminAccessCommand(msg, adminUser);
+  } else if (command.includes('force create admin')) {
+    await handleForceCreateAdminCommand(msg, adminUser);
   } else {
     await msg.reply(
       `🔧 *Admin Commands*\n\n` +
@@ -681,6 +691,120 @@ async function handleSystemStatusCommand(msg, adminUser) {
   await msg.reply(response);
 }
 
+async function handleTestAdminAccessCommand(msg, adminUser) {
+  try {
+    const userId = msg.from;
+    const testPhone = '6309513603';
+    
+    // Test different phone number formats
+    const testResults = adminSystem.testAdminAccess(testPhone);
+    
+    let response = `🔍 *Admin Access Test Results*\n\n`;
+    response += `*Your Phone:* ${userId}\n`;
+    response += `*Your Role:* ${adminUser.role.toUpperCase()}\n`;
+    response += `*Your Permissions:* ${adminUser.permissions.join(', ')}\n\n`;
+    
+    response += `*Testing Phone:* ${testPhone}\n`;
+    response += `*Normalized:* ${testResults.normalizedPhone}\n`;
+    response += `*Is Admin:* ${testResults.isAdmin ? '✅ Yes' : '❌ No'}\n`;
+    
+    if (testResults.userData) {
+      response += `*Admin Data:* ${testResults.userData.role} - ${testResults.userData.name}\n`;
+    }
+    
+    response += `\n*All Admin Phones:*\n`;
+    testResults.allAdminPhones.forEach(phone => {
+      response += `• ${phone}\n`;
+    });
+    
+    await msg.reply(response);
+  } catch (error) {
+    await msg.reply(`❌ *Test Failed*\n\n` +
+      `*Error:* ${error.message}`
+    );
+  }
+}
+
+async function handleForceCreateAdminCommand(msg, adminUser) {
+  const parts = msg.body.split(' ');
+  if (parts.length < 5) {
+    await msg.reply(
+      `❌ *Invalid Format*\n\n` +
+      `Usage: \`.admin force create admin <phone> <role> <name>\`\n\n` +
+      `*Example:*\n` +
+      `\`.admin force create admin 919876543210@c.us super_admin John Doe\`\n\n` +
+      `*Available Roles:*\n` +
+      `• super_admin (Super Admin only)\n` +
+      `• admin\n` +
+      `• moderator\n` +
+      `• viewer`
+    );
+    return;
+  }
+  
+  const phone = parts[3];
+  const role = parts[4];
+  const name = parts.slice(5).join(' ');
+  
+  try {
+    // Force create admin, bypassing role restrictions
+    const newAdmin = await adminSystem.forceCreateAdmin(phone, role, name, adminUser.name);
+    
+    await msg.reply(
+      `✅ *Admin Force Created Successfully*\n\n` +
+      `*Phone:* ${phone}\n` +
+      `*Name:* ${newAdmin.name}\n` +
+      `*Role:* ${newAdmin.role}\n` +
+      `*Added By:* ${newAdmin.addedBy}\n` +
+      `*Permissions:* ${newAdmin.permissions.length}`
+    );
+  } catch (error) {
+    await msg.reply(`❌ *Error:* ${error.message}`);
+  }
+}
+
+async function handleCheckAdminCommand(msg) {
+  const userId = msg.from;
+  const isAdmin = adminSystem.isAdmin(userId);
+  const adminUser = adminSystem.getAdminUser(userId);
+
+  let response = `🔍 *Admin Check*\n\n`;
+  response += `*Your Phone:* ${userId}\n`;
+  response += `*Your Role:* ${isAdmin ? adminUser.role.toUpperCase() : 'Not Admin'}\n`;
+  response += `*Your Permissions:* ${isAdmin ? adminUser.permissions.join(', ') : 'None'}\n`;
+
+  if (isAdmin) {
+    response += `\n*Your Admin Status:* ${adminUser.role.toUpperCase()}\n`;
+    response += `*Permissions:* ${adminUser.permissions.length}\n`;
+    response += `*Last Active:* ${adminUser.lastActive ? new Date(adminUser.lastActive).toLocaleString() : 'Never'}\n`;
+  }
+
+  await msg.reply(response);
+}
+
+async function handleCreateDefaultAdminCommand(msg) {
+  const userId = msg.from;
+  const isAdmin = adminSystem.isAdmin(userId);
+
+  if (!isAdmin) {
+    await msg.reply('❌ You must be an admin to force create the default admin.');
+    return;
+  }
+
+  try {
+    const result = await adminSystem.forceCreateDefaultAdmin();
+    await msg.reply(
+      `✅ *Default Admin Force Created Successfully*\n\n` +
+      `*Phone:* ${result.normalizedPhone}\n` +
+      `*Name:* ${result.userData.name}\n` +
+      `*Role:* ${result.userData.role}\n` +
+      `*Permissions:* ${result.userData.permissions.length}`
+    );
+  } catch (error) {
+    await msg.reply(`❌ *Error:* ${error.message}`);
+  }
+}
+
 // Helper function to create progress bar
 function createProgressBar(percentage, length = 10) {
   const filled = Math.round((percentage / 100) * length);
@@ -702,14 +826,18 @@ function getHelpText() {
   helpText += `• \`.queue\` - Current upload queue status\n`;
   helpText += `• \`.health\` - Detailed bot health report\n`;
   helpText += `• \`.stats\` - Upload statistics and metrics\n`;
-  helpText += `• \`.ping\` - Check bot responsiveness\n\n`;
+  helpText += `• \`.ping\` - Check bot responsiveness\n`;
+  helpText += `• \`.check admin\` - Check your admin status\n`;
+  helpText += `• \`.create default admin\` - Force create the default admin\n\n`;
   
   helpText += `🔧 *Admin Commands:*\n`;
-  helpText += `• \`.admin\` - Show admin command help\n`;
-  helpText += `• \`.admin add admin <phone> <role> <name>\`\n`;
-  helpText += `• \`.admin restrict user <phone> <reason> [duration]\`\n`;
-  helpText += `• \`.admin warn user <phone> <reason>\`\n`;
-  helpText += `• \`.admin system status\`\n\n`;
+  helpText += `• \`.admin\` - Show admin command help\n` +
+      `• \`.admin add admin <phone> <role> <name>\`\n` +
+      `• \`.admin restrict user <phone> <reason> [duration]\`\n` +
+      `• \`.admin warn user <phone> <reason>\`\n` +
+      `• \`.admin system status\`\n` +
+      `• \`.admin test access\` - Test admin access\n` +
+      `• \`.admin force create admin <phone> <role> <name>\`\n\n`;
   
   helpText += `❓ *Need Help?*\n`;
   helpText += `Contact an administrator for assistance.`;

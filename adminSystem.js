@@ -110,6 +110,9 @@ class AdminSystem {
       // Create default admin if no config exists
       await this.createDefaultAdmin();
     }
+    
+    // Ensure default admin exists after loading config
+    await this.ensureDefaultAdminExists();
   }
 
   // Save admin configuration to file
@@ -148,19 +151,107 @@ class AdminSystem {
     await this.saveAdminConfig();
   }
 
+  // Ensure default admin exists
+  async ensureDefaultAdminExists() {
+    const defaultAdminPhone = process.env.DEFAULT_ADMIN_PHONE || '916309513603@c.us';
+    
+    if (!this.adminUsers.has(defaultAdminPhone)) {
+      console.log(`Default admin not found, creating: ${defaultAdminPhone}`);
+      await this.createDefaultAdmin();
+    } else {
+      console.log(`Default admin already exists: ${defaultAdminPhone}`);
+    }
+  }
+
+  // Normalize phone number to standard format
+  normalizePhoneNumber(phone) {
+    // Remove any non-digit characters
+    let cleanPhone = phone.replace(/\D/g, '');
+    
+    // If it starts with 91 and is 12 digits, add @c.us
+    if (cleanPhone.startsWith('91') && cleanPhone.length === 12) {
+      return cleanPhone + '@c.us';
+    }
+    
+    // If it's 10 digits and doesn't start with 91, add 91 and @c.us
+    if (cleanPhone.length === 10 && !cleanPhone.startsWith('91')) {
+      return '91' + cleanPhone + '@c.us';
+    }
+    
+    // If it already has @c.us, return as is
+    if (phone.includes('@c.us')) {
+      return phone;
+    }
+    
+    // Default: add @c.us if not present
+    return phone.includes('@') ? phone : phone + '@c.us';
+  }
+
+  // Test admin access with different phone formats
+  testAdminAccess(phone) {
+    const normalized = this.normalizePhoneNumber(phone);
+    const isAdminUser = this.adminUsers.has(normalized);
+    const userData = this.adminUsers.get(normalized);
+    
+    return {
+      originalPhone: phone,
+      normalizedPhone: normalized,
+      isAdmin: isAdminUser,
+      userData: userData,
+      allAdminPhones: Array.from(this.adminUsers.keys())
+    };
+  }
+
+  // Force create default admin (useful for debugging)
+  async forceCreateDefaultAdmin() {
+    console.log('Force creating default admin...');
+    await this.createDefaultAdmin();
+    return this.testAdminAccess('6309513603');
+  }
+
+  // Force create admin (bypasses role restrictions)
+  async forceCreateAdmin(phone, role, name, addedBy) {
+    if (!this.adminRoles.has(role)) {
+      throw new Error(`Invalid role: ${role}`);
+    }
+
+    const normalizedPhone = this.normalizePhoneNumber(phone);
+    
+    // Remove existing admin if exists
+    if (this.adminUsers.has(normalizedPhone)) {
+      this.adminUsers.delete(normalizedPhone);
+    }
+
+    const roleData = this.adminRoles.get(role);
+    this.adminUsers.set(normalizedPhone, {
+      role,
+      name,
+      addedAt: new Date().toISOString(),
+      addedBy,
+      lastActive: new Date().toISOString(),
+      permissions: roleData.permissions
+    });
+
+    await this.saveAdminConfig();
+    return this.adminUsers.get(normalizedPhone);
+  }
+
   // Check if user is admin
   isAdmin(phone) {
-    return this.adminUsers.has(phone);
+    const normalizedPhone = this.normalizePhoneNumber(phone);
+    return this.adminUsers.has(normalizedPhone);
   }
 
   // Get admin user data
   getAdminUser(phone) {
-    return this.adminUsers.get(phone);
+    const normalizedPhone = this.normalizePhoneNumber(phone);
+    return this.adminUsers.get(normalizedPhone);
   }
 
   // Check if user has specific permission
   hasPermission(phone, permission) {
-    const user = this.adminUsers.get(phone);
+    const normalizedPhone = this.normalizePhoneNumber(phone);
+    const user = this.adminUsers.get(normalizedPhone);
     if (!user) return false;
 
     const role = this.adminRoles.get(user.role);
@@ -181,7 +272,8 @@ class AdminSystem {
 
   // Get user's permission level
   getPermissionLevel(phone) {
-    const user = this.adminUsers.get(phone);
+    const normalizedPhone = this.normalizePhoneNumber(phone);
+    const user = this.adminUsers.get(normalizedPhone);
     if (!user) return 0;
 
     const role = this.adminRoles.get(user.role);
