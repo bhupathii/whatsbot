@@ -42,11 +42,30 @@ class UploadQueue extends EventEmitter {
       const fileHash = await this.generateFileHash(filePath);
       const userKey = `${userId}_${fileHash}`;
       
-      // Check if we've seen this file before
+      // Check if we've seen this file before in our local cache
       if (this.completedUploads.has(userKey)) {
         return {
           isDuplicate: true,
-          existingFile: this.completedUploads.get(userKey)
+          existingFile: this.completedUploads.get(userKey),
+          source: 'local'
+        };
+      }
+      
+      // Check if file already exists in Google Drive
+      const fileStats = await fs.stat(filePath);
+      const { checkFileExists } = require('./googleDrive');
+      const driveCheck = await checkFileExists(path.basename(filePath), fileStats.size);
+      
+      if (driveCheck.exists) {
+        return {
+          isDuplicate: true,
+          existingFile: {
+            shareLink: driveCheck.shareLink,
+            uploadTime: new Date(driveCheck.createdTime).getTime(),
+            filename: path.basename(filePath),
+            source: 'drive'
+          },
+          source: 'drive'
         };
       }
       
@@ -72,10 +91,13 @@ class UploadQueue extends EventEmitter {
     const duplicateCheck = await this.isDuplicate(filePath, userId);
     if (duplicateCheck.isDuplicate) {
       const existingFile = duplicateCheck.existingFile;
+      const sourceText = duplicateCheck.source === 'drive' ? 'Google Drive' : 'recent upload';
+      
       await originalMessage.reply(
-        `⚠️ This file appears to be a duplicate!\n\n` +
-        `Original upload: ${existingFile.shareLink}\n` +
-        `Uploaded: ${new Date(existingFile.uploadTime).toLocaleString()}`
+        `⚠️ This file already exists in ${sourceText}!\n\n` +
+        `📁 File: ${existingFile.filename}\n` +
+        `🔗 Link: ${existingFile.shareLink}\n` +
+        `📅 Uploaded: ${new Date(existingFile.uploadTime).toLocaleString()}`
       );
       return { status: 'duplicate', existingFile };
     }

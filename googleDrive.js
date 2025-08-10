@@ -28,8 +28,10 @@ const SCOPES = [
 const DATA_DIR = process.env.DATA_DIR || '/app/data';
 const TOKEN_PATH = path.join(DATA_DIR, 'token.json');
 const CREDENTIALS_PATH = process.env.CREDENTIALS_PATH || path.join(process.cwd(), 'credentials.json');
+const UPLOAD_FOLDER_NAME = 'whatsapp-bot-upload';
 
 let oauth2Client;
+let uploadFolderId = null;
 
 async function loadCredentials() {
   if (!fs.existsSync(CREDENTIALS_PATH)) {
@@ -85,9 +87,56 @@ async function getDriveClient() {
   return google.drive({ version: 'v3', auth: oauth2Client });
 }
 
+async function ensureUploadFolder() {
+  if (uploadFolderId) return uploadFolderId;
+  
+  const drive = await getDriveClient();
+  
+  try {
+    // First, try to find existing folder
+    const searchResponse = await drive.files.list({
+      q: `name='${UPLOAD_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id, name)',
+      spaces: 'drive'
+    });
+    
+    if (searchResponse.data.files && searchResponse.data.files.length > 0) {
+      uploadFolderId = searchResponse.data.files[0].id;
+      console.log(`Found existing upload folder: ${UPLOAD_FOLDER_NAME} (ID: ${uploadFolderId})`);
+      return uploadFolderId;
+    }
+    
+    // Create new folder if it doesn't exist
+    const folderMetadata = {
+      name: UPLOAD_FOLDER_NAME,
+      mimeType: 'application/vnd.google-apps.folder'
+    };
+    
+    const folder = await drive.files.create({
+      resource: folderMetadata,
+      fields: 'id, name'
+    });
+    
+    uploadFolderId = folder.data.id;
+    console.log(`Created new upload folder: ${UPLOAD_FOLDER_NAME} (ID: ${uploadFolderId})`);
+    
+    // Make folder accessible to anyone with the link
+    await drive.permissions.create({
+      fileId: uploadFolderId,
+      requestBody: { role: 'reader', type: 'anyone' }
+    });
+    
+    return uploadFolderId;
+  } catch (error) {
+    console.error('Error ensuring upload folder:', error);
+    throw error;
+  }
+}
+
 async function ensureGoogleAuthReady() {
   try {
     await getDriveClient();
+    await ensureUploadFolder();
     console.log('Google Drive auth is ready.');
   } catch (err) {
     console.warn('Google Drive auth not ready yet:', err.message);
@@ -96,8 +145,16 @@ async function ensureGoogleAuthReady() {
 
 async function uploadFileToDrive(filePath, mimeType, fileName) {
   const drive = await getDriveClient();
+  const folderId = await ensureUploadFolder();
+  
+  // Get file stats for size checking
+  const fileStats = await fsExtra.stat(filePath);
+  const fileSize = fileStats.size;
 
-  const requestBody = { name: fileName };
+  const requestBody = { 
+    name: fileName,
+    parents: [folderId] // Upload to our dedicated folder
+  };
   const media = { mimeType, body: fs.createReadStream(filePath) };
 
   const createRes = await drive.files.create({
@@ -122,7 +179,43 @@ async function uploadFileToDrive(filePath, mimeType, fileName) {
   return shareLink;
 }
 
+async function checkFileExists(fileName, fileSize) {
+  try {
+    const drive = await getDriveClient();
+    const folderId = await ensureUploadFolder();
+    
+    // Search for files with the same name in our upload folder
+    const searchResponse = await drive.files.list({
+      q: `name='${fileName}' and '${folderId}' in parents and trashed=false`,
+      fields: 'files(id, name, size, webViewLink, webContentLink, createdTime)',
+      spaces: 'drive'
+    });
+    
+    if (searchResponse.data.files && searchResponse.data.files.length > 0) {
+      const existingFile = searchResponse.data.files[0];
+      
+      // If file sizes match, it's likely the same file
+      if (existingFile.size && parseInt(existingFile.size) === fileSize) {
+        const shareLink = existingFile.webViewLink || existingFile.webContentLink;
+        return {
+          exists: true,
+          fileId: existingFile.id,
+          shareLink,
+          createdTime: existingFile.createdTime
+        };
+      }
+    }
+    
+    return { exists: false };
+  } catch (error) {
+    console.error('Error checking if file exists:', error);
+    return { exists: false, error: error.message };
+  }
+}
+
 module.exports = {
   uploadFileToDrive,
   ensureGoogleAuthReady,
+  checkFileExists,
+  ensureUploadFolder,
 };
