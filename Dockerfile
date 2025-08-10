@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y \
     lsb-release \
     wget \
     xdg-utils \
+    cron \
   && rm -rf /var/lib/apt/lists/*
 
 # Prevent Puppeteer from downloading Chromium (we use system chromium)
@@ -51,6 +52,7 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 # Persisted directories for session and temp files
 ENV DATA_DIR=/app/data
 ENV TEMP_DIR=/app/temp
+ENV MAX_CONCURRENT_UPLOADS=3
 RUN mkdir -p $DATA_DIR $TEMP_DIR
 
 # Install dependencies
@@ -59,6 +61,11 @@ RUN npm ci --only=production || npm install --only=production
 
 # Copy app
 COPY . .
+
+# Create cron job for health monitoring (optional)
+RUN echo "*/5 * * * * root cd /app && node -e \"console.log('Health check at', new Date().toISOString())\" >> /var/log/cron.log 2>&1" > /etc/cron.d/health-check
+RUN chmod 0644 /etc/cron.d/health-check
+RUN crontab /etc/cron.d/health-check
 
 # Default command
 CMD ["node", "index.js"]
